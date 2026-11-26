@@ -47,7 +47,8 @@ async function main() {
       reason: outcome.kind === 'error' ? outcome.error : 'IOC order did not fill',
       hlResult: closeResult,
     }));
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
 
   // Read the position back. If it still shows the old size, give Hyperliquid a
@@ -101,7 +102,11 @@ async function main() {
   }));
 
   // Anything other than a full close needs attention.
-  if (status !== 'closed') process.exit(1);
+  if (status !== 'closed') process.exitCode = 1;
 }
 
-main().catch(e => { console.error(e.message); process.exit(1); });
+// Exit once output is flushed: the Hyperliquid SDK leaves connections open that
+// would otherwise keep the process running after it has finished.
+main()
+  .then(() => process.stdout.write("", () => process.exit()))
+  .catch(e => { console.error(e.message); process.exit(1); });

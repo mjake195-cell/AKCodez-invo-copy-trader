@@ -134,7 +134,8 @@ async function main() {
       reason: outcome.kind === 'error' ? outcome.error : 'IOC order did not fill',
       hlResult: orderResult,
     }));
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
 
   const status = outcome.filledSz < size ? 'partially_filled' : 'filled';
@@ -206,4 +207,8 @@ async function main() {
   }));
 }
 
-main().catch(e => { console.error(e.message); process.exit(1); });
+// Exit once output is flushed: the Hyperliquid SDK leaves connections open that
+// would otherwise keep the process running after it has finished.
+main()
+  .then(() => process.stdout.write("", () => process.exit()))
+  .catch(e => { console.error(e.message); process.exit(1); });

@@ -487,7 +487,7 @@ npx tsx src/commands/trade.ts <coin> <long|short> <size> [leverage] ['<mimicMeta
 
 `status` is `filled` or `partially_filled` (IOC filled only part: `filledSize` < `size`). Use `filledSize` and `avgPx` as what we actually hold.
 
-**`baseShortId`** is the id Invo returned for our position, or `null` if Invo didn't return one. Save it for Phase 5 if it's set; if it's `null`, close without it (Invo detects the close itself).
+**`baseShortId`** is the id Invo returned for our position, or `null` if Invo didn't return one. In live testing Invo's `/dex/position/create` returned `{success, data: {positionRecordId, eventId, tradeId, ...}}` and **no** `baseShortId`, so expect `null` and close without it (Invo detects the close itself). Check `invoResult.success` to confirm Invo recorded the open.
 
 **Show execution panel:**
 ```
