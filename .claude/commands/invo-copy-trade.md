@@ -529,15 +529,24 @@ npx tsx src/commands/close.ts <coin> [baseShortId]
 - `coin`: the asset to close (must have an open position)
 - `baseShortId`: the `baseShortId` from our `trade.ts` output, **only if it was not `null`**. If provided, records close on Invo. If omitted, Invo auto-detects the HL close within ~30s. Never pass the trader's `baseShortId` from a signal here.
 
-**`close.ts` does not yet check whether its order filled.** After every close, confirm the position is actually gone, e.g. by running `preflight.ts` and checking the open-position count, before reporting it closed. If it is still open, tell the user.
+**Read `status` before reporting a close.** `close.ts` checks Hyperliquid's answer and reads the position back:
+
+| `status` | Meaning | Exit code |
+|---|---|---|
+| `closed` | Position is gone (`qtyAfter` is `0`). Recorded on Invo if `baseShortId` was given | 0 |
+| `partially_closed` | Only part filled; `qtyAfter` is what's still open. **Not** recorded on Invo | 1 |
+| `not_filled` / `rejected` | Nothing closed (price moved more than 2%, or Hyperliquid refused: see `reason`) | 1 |
+| `flipped` | The position changed while closing and now points the other way. Tell the user immediately | 1 |
+
+On exit code 1, the position is still (partly) open. Run `close.ts` once more for `partially_closed` / `not_filled`; if it fails again, stop and tell the user. Never report a position as closed unless `status` is `closed`.
 
 **If we hold other positions in the same coin** (e.g. the user's own manual trades, or two copied traders on one coin), `close.ts` closes the **entire** position in that coin, not just the copied part. Warn the user before closing in that case.
 
 **What happens:**
 1. Reads current position from HL (size + direction)
 2. Places opposite-direction IOC limit order (full size → flatten)
-3. If baseShortId provided: records close via `POST /dex/position/close`
-4. Outputs JSON with close details
+3. Checks the fill and reads the position back; if (and only if) fully closed and baseShortId provided: records close via `POST /dex/position/close`
+4. Outputs JSON with `status`, `qtyBefore`, `qtyAfter`, `filledSize`, `avgPx`
 
 **Show close panel:**
 ```

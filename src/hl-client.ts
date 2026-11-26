@@ -73,7 +73,7 @@ export async function getAccountState(wallet: string) {
 /** The SDK returns Hyperliquid's {status:'err'} answers instead of throwing; turn them into errors. */
 function assertOk(result: any, action: string) {
   if (!result || result.status !== 'ok') {
-    const reason = typeof result?.response === 'string' ? result.response : JSON.stringify(result);
+    const reason = typeof result?.response === 'string' ? result.response : (JSON.stringify(result) ?? 'No response from Hyperliquid');
     throw new Error(`Hyperliquid rejected ${action}: ${reason}`);
   }
   return result;
@@ -93,7 +93,7 @@ export type OrderOutcome =
 /** Read the per-order status out of an order response (filled / resting / error). */
 export function parseOrderOutcome(result: any): OrderOutcome {
   if (!result || result.status !== 'ok') {
-    const reason = typeof result?.response === 'string' ? result.response : JSON.stringify(result);
+    const reason = typeof result?.response === 'string' ? result.response : (JSON.stringify(result) ?? 'No response from Hyperliquid');
     return { kind: 'error', error: reason };
   }
   const st = result.response?.data?.statuses?.[0];
@@ -140,11 +140,13 @@ export async function closePosition(coin: string, wallet: string) {
   const pos = positions.find((p: any) => p.coin === coin);
   if (!pos) throw new Error(`No open position for ${coin}`);
 
-  const size = Math.abs(parseFloat(pos.szi));
   const isLong = parseFloat(pos.szi) > 0;
+  // Use Hyperliquid's own size string (already at the coin's decimals) rather than
+  // number.toString(), which turns tiny sizes into "1e-7" notation that HL rejects.
+  const size = String(pos.szi).replace(/^-/, '');
 
   // Close = opposite direction
-  return placeMarketOrder(coin, !isLong, size.toString(), 0.02);
+  return placeMarketOrder(coin, !isLong, size, 0.02);
 }
 
 export { INVO_BUILDER };

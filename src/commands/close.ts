@@ -7,6 +7,12 @@ validateEnv();
 if (INVO_TOKEN) invo.setToken(INVO_TOKEN);
 if (INVO_REFRESH_TOKEN) invo.setRefreshToken(INVO_REFRESH_TOKEN);
 
+async function currentSzi(coin: string): Promise<string> {
+  const positions = await hl.getPositions(WALLET_ADDRESS);
+  const pos = positions.find((p: any) => p.coin === coin);
+  return pos ? pos.szi : '0';
+}
+
 async function main() {
   const [coin, baseShortId] = process.argv.slice(2);
 
@@ -18,11 +24,8 @@ async function main() {
   await hl.connect(HL_AGENT_KEY, WALLET_ADDRESS);
 
   // Current position
-  const positions = await hl.getPositions(WALLET_ADDRESS);
-  const pos = positions.find((p: any) => p.coin === coin);
-  if (!pos) throw new Error(`No open position for ${coin}`);
-
-  const qtyBefore = pos.szi;
+  const qtyBefore = await currentSzi(coin);
+  if (parseFloat(qtyBefore) === 0) throw new Error(`No open position for ${coin}`);
 
   // Resolve asset index
   const meta = await hl.getMeta();
@@ -33,9 +36,39 @@ async function main() {
   const nonceMs = Date.now();
   const closeResult = await hl.closePosition(coin, WALLET_ADDRESS);
 
-  // Record on Invo (best-effort — Invo auto-detects HL closes)
+  // Report what actually happened instead of always "closed".
+  const outcome = hl.parseOrderOutcome(closeResult);
+  if (outcome.kind !== 'filled') {
+    console.log(JSON.stringify({
+      status: outcome.kind === 'resting' ? 'not_filled' : 'rejected',
+      coin,
+      qtyBefore,
+      qtyAfter: qtyBefore,
+      reason: outcome.kind === 'error' ? outcome.error : 'IOC order did not fill',
+      hlResult: closeResult,
+    }));
+    process.exit(1);
+  }
+
+  // Read the position back. If it still shows the old size, give Hyperliquid a
+  // moment to update and read it once more.
+  let qtyAfter = await currentSzi(coin);
+  if (qtyAfter === qtyBefore) {
+    await new Promise(r => setTimeout(r, 1000));
+    qtyAfter = await currentSzi(coin);
+  }
+  const before = parseFloat(qtyBefore);
+  const after = parseFloat(qtyAfter);
+
+  let status: 'closed' | 'partially_closed' | 'flipped';
+  if (after === 0) status = 'closed';
+  else if (Math.sign(after) === Math.sign(before)) status = 'partially_closed';
+  else status = 'flipped'; // the position changed between reading it and closing it
+
+  // Record on Invo (best-effort — Invo auto-detects HL closes). Only a full close is
+  // recorded, so Invo never shows a position as closed while part of it is still open.
   let invoResult: any = null;
-  if (baseShortId) {
+  if (baseShortId && status === 'closed') {
     try {
       invoResult = await invo.recordClose({
         clientTxId: randomUUID(),
@@ -48,7 +81,7 @@ async function main() {
         },
         summary: {
           qtyBefore,
-          qtyAfter: '0',
+          qtyAfter,
         },
       });
     } catch (e: any) {
@@ -57,12 +90,18 @@ async function main() {
   }
 
   console.log(JSON.stringify({
-    status: 'closed',
+    status,
     coin,
     qtyBefore,
+    qtyAfter,
+    filledSize: outcome.filledSz,
+    avgPx: outcome.avgPx,
     hlResult: closeResult,
     invoResult,
   }));
+
+  // Anything other than a full close needs attention.
+  if (status !== 'closed') process.exit(1);
 }
 
 main().catch(e => { console.error(e.message); process.exit(1); });
