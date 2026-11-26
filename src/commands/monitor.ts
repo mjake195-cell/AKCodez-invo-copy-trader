@@ -2,6 +2,7 @@ import { existsSync, readFileSync, renameSync, writeFileSync } from 'fs';
 import { resolve } from 'path';
 import { validateEnv, INVO_TOKEN, INVO_REFRESH_TOKEN } from '../env.js';
 import * as invo from '../invo-client.js';
+import { classify } from '../feed-classify.js';
 
 validateEnv();
 if (INVO_TOKEN) invo.setToken(INVO_TOKEN);
@@ -26,6 +27,7 @@ const STATE_FILE = resolve(process.env.MONITOR_STATE_FILE ?? '.monitor-state.jso
 interface State {
   seenPosts: string[];
   seenUpdates: string[];
+  seenEvents: string[]; // "<baseShortId>:open" / "<baseShortId>:close" already reported
 }
 
 function loadState(): State | null {
@@ -35,6 +37,7 @@ function loadState(): State | null {
     return {
       seenPosts: Array.isArray(s.seenPosts) ? s.seenPosts : [],
       seenUpdates: Array.isArray(s.seenUpdates) ? s.seenUpdates : [],
+      seenEvents: Array.isArray(s.seenEvents) ? s.seenEvents : [],
     };
   } catch {
     console.error(JSON.stringify({ type: 'error', source: 'state', message: `Unreadable ${STATE_FILE}; starting fresh` }));
@@ -42,10 +45,11 @@ function loadState(): State | null {
   }
 }
 
-function saveState(seenPosts: Set<string>, seenUpdates: Set<string>) {
+function saveState(seenPosts: Set<string>, seenUpdates: Set<string>, seenEvents: Set<string>) {
   const state: State = {
     seenPosts: [...seenPosts].slice(-MAX_REMEMBERED),
     seenUpdates: [...seenUpdates].slice(-MAX_REMEMBERED),
+    seenEvents: [...seenEvents].slice(-MAX_REMEMBERED),
   };
   const tmp = `${STATE_FILE}.tmp`;
   writeFileSync(tmp, JSON.stringify(state));
@@ -95,6 +99,7 @@ async function main() {
   const saved = loadState();
   const seenPosts = new Set<string>(saved?.seenPosts ?? []);
   const seenUpdates = new Set<string>(saved?.seenUpdates ?? []);
+  const seenEvents = new Set<string>(saved?.seenEvents ?? []);
   // Only on the very first run (no state file yet) are existing posts and updates
   // indexed silently; after that, anything unseen is reported, even after a restart.
   let indexing = saved === null;
@@ -173,13 +178,41 @@ async function main() {
           continue;
         }
 
+        const event = classify(update);
+        if (event.kind === 'ignore') continue; // TP/SL/notes edits: nothing to copy
+        if (event.kind === 'unknown') {
+          console.log(JSON.stringify({
+            type: 'skipped',
+            poll: pollCount,
+            postId: post.id,
+            coin: update.ticker,
+            reason: `Unrecognised trade change (${event.changedFields.join(', ') || 'no fields'})`,
+          }));
+          continue;
+        }
+        const action = event.kind;
         const isOpen = update.isOpen === true;
-        const isClosed = update.isOpen === false && update.closingPrice != null;
 
-        let action: string;
-        if (isClosed) action = 'close';
-        else if (update.changes?.isAdded !== false) action = 'open';
-        else action = 'increase';
+        // The update fields show the trade as it is NOW, not when the post was made.
+        // Don't copy an open or add-on for a trade the trader has already closed
+        // (this happens when a restart catches up on older posts).
+        if ((action === 'open' || action === 'increase' || action === 'reduce') && !isOpen) {
+          console.log(JSON.stringify({
+            type: 'skipped',
+            poll: pollCount,
+            postId: post.id,
+            coin: update.ticker,
+            reason: `"${action}" post for a trade that has since closed`,
+          }));
+          continue;
+        }
+
+        // Report each trade's open and close only once.
+        if (action === 'open' || action === 'close') {
+          const eventKey = `${update.baseShortId}:${action}`;
+          if (seenEvents.has(eventKey)) continue;
+          seenEvents.add(eventKey);
+        }
 
         console.log(JSON.stringify({
           type: 'signal',
@@ -200,6 +233,8 @@ async function main() {
             entryPrice: update.entryPrice,
             closingPrice: update.closingPrice ?? null,
             entrySize: update.entrySize,
+            previousEntrySize: event.previousEntrySize ?? null,
+            reasonClosed: action === 'close' ? (update.reasonClosed ?? null) : null,
             isOpen,
           },
           portfolio: {
@@ -231,7 +266,7 @@ async function main() {
     if (indexing && feedOk) indexing = false;
 
     try {
-      saveState(seenPosts, seenUpdates);
+      saveState(seenPosts, seenUpdates, seenEvents);
     } catch (e: any) {
       console.error(JSON.stringify({ type: 'error', source: 'state', message: `Could not save ${STATE_FILE}: ${e.message}` }));
     }
