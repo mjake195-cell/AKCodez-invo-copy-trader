@@ -1,3 +1,5 @@
+import { existsSync, readFileSync, renameSync, writeFileSync } from 'fs';
+import { resolve } from 'path';
 import { validateEnv, INVO_TOKEN, INVO_REFRESH_TOKEN } from '../env.js';
 import * as invo from '../invo-client.js';
 
@@ -10,6 +12,52 @@ interface WatchEntry {
   mimicStartedAt: string;
 }
 
+const POLL_INTERVAL = 5_000;
+// Give up after this many failed polls in a row (~1 minute), so a dead login or
+// network never leaves --wait-for-signal hanging forever.
+const MAX_CONSECUTIVE_FAILURES = 12;
+// How many seen ids to remember on disk (the feed only returns the newest 20).
+const MAX_REMEMBERED = 2000;
+
+// Seen posts/updates are kept on disk so a restart only skips what was already
+// reported, instead of silently dropping everything posted while it was down.
+const STATE_FILE = resolve(process.env.MONITOR_STATE_FILE ?? '.monitor-state.json');
+
+interface State {
+  seenPosts: string[];
+  seenUpdates: string[];
+}
+
+function loadState(): State | null {
+  if (!existsSync(STATE_FILE)) return null;
+  try {
+    const s = JSON.parse(readFileSync(STATE_FILE, 'utf8'));
+    return {
+      seenPosts: Array.isArray(s.seenPosts) ? s.seenPosts : [],
+      seenUpdates: Array.isArray(s.seenUpdates) ? s.seenUpdates : [],
+    };
+  } catch {
+    console.error(JSON.stringify({ type: 'error', source: 'state', message: `Unreadable ${STATE_FILE}; starting fresh` }));
+    return null;
+  }
+}
+
+function saveState(seenPosts: Set<string>, seenUpdates: Set<string>) {
+  const state: State = {
+    seenPosts: [...seenPosts].slice(-MAX_REMEMBERED),
+    seenUpdates: [...seenUpdates].slice(-MAX_REMEMBERED),
+  };
+  const tmp = `${STATE_FILE}.tmp`;
+  writeFileSync(tmp, JSON.stringify(state));
+  renameSync(tmp, STATE_FILE); // atomic, so a crash mid-write can't corrupt the file
+}
+
+function ageSeconds(iso: string | undefined): number | null {
+  if (!iso) return null;
+  const t = Date.parse(iso);
+  return Number.isNaN(t) ? null : Math.round((Date.now() - t) / 1000);
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const waitMode = args.includes('--wait-for-signal');
@@ -17,13 +65,15 @@ async function main() {
 
   if (jsonArgs.length === 0) {
     console.error('Usage: monitor [--wait-for-signal] <portfolioIds> [watchEntries]');
-    console.error('  Portfolio IDs: \'["id1","id2"]\'');
+    console.error('  Portfolio IDs: \'["id1","id2"]\'  (only these portfolios\' trades are reported)');
     console.error('  Watch entries: \'[{"baseShortId":"x","mimicStartedAt":"..."}]\'');
     console.error('  Both:          \'["id1"]\'  \'[{"baseShortId":"x","mimicStartedAt":"..."}]\'');
     console.error('');
     console.error('Modes:');
     console.error('  default:             Run forever, print all signals as JSON lines');
     console.error('  --wait-for-signal:   Exit after first signal (for agent auto-notify)');
+    console.error('');
+    console.error(`Seen posts are remembered in ${STATE_FILE} (override with MONITOR_STATE_FILE).`);
     process.exit(1);
   }
 
@@ -39,19 +89,34 @@ async function main() {
   }
 
   const isWatchEntries = watchEntries.length > 0;
-  const parsed = isWatchEntries ? watchEntries : portfolioIds;
+  // With no portfolio IDs given, every followed trader is reported (as before).
+  const portfolioFilter = portfolioIds.length > 0 ? new Set(portfolioIds) : null;
 
-  const seenPosts = new Set<string>();
-  const seenUpdates = new Set<string>();
+  const saved = loadState();
+  const seenPosts = new Set<string>(saved?.seenPosts ?? []);
+  const seenUpdates = new Set<string>(saved?.seenUpdates ?? []);
+  // Only on the very first run (no state file yet) are existing posts and updates
+  // indexed silently; after that, anything unseen is reported, even after a restart.
+  let indexing = saved === null;
+
   let pollCount = 0;
-  let isFirstFeedPoll = true;
+  let feedFailures = 0;
+  let tradeFailures = 0;
 
-  const TRADE_INTERVAL = 5_000;
-  const FEED_INTERVAL = 5_000; // 5s for faster signal detection
+  const giveUp = (source: string, failures: number, message: string) => {
+    console.log(JSON.stringify({
+      type: 'fatal',
+      source,
+      consecutiveFailures: failures,
+      message: `Stopping: ${failures} failed ${source} polls in a row. Last error: ${message}`,
+    }));
+    process.exit(2);
+  };
 
   const poll = async (): Promise<boolean> => {
     pollCount++;
     let signalFound = false;
+    let feedOk = false;
 
     // Poll /dex/trade if we have watch entries
     if (isWatchEntries) {
@@ -60,14 +125,18 @@ async function main() {
         const items = (data as any).investments ?? (data as any).items ?? [];
         for (const item of items) {
           const key = `${item.baseShortId ?? item.id}_${item.lastUpdate ?? ''}`;
-          if (!seenUpdates.has(key)) {
-            seenUpdates.add(key);
-            console.log(JSON.stringify({ type: 'trade_update', poll: pollCount, data: item }));
-            signalFound = true;
-          }
+          if (seenUpdates.has(key)) continue;
+          seenUpdates.add(key);
+          // Don't report updates that already existed on the first-ever run
+          if (indexing) continue;
+          console.log(JSON.stringify({ type: 'trade_update', poll: pollCount, data: item }));
+          signalFound = true;
         }
+        tradeFailures = 0;
       } catch (e: any) {
-        console.error(JSON.stringify({ type: 'error', source: 'trade', message: e.message }));
+        tradeFailures++;
+        console.error(JSON.stringify({ type: 'error', source: 'trade', consecutiveFailures: tradeFailures, message: e.message }));
+        if (tradeFailures >= MAX_CONSECUTIVE_FAILURES) giveUp('trade', tradeFailures, e.message);
       }
     }
 
@@ -83,15 +152,29 @@ async function main() {
         const update = post.update;
         if (!update || !update.ticker) continue;
 
-        // Skip first poll results (existing posts, not new signals)
-        if (isFirstFeedPoll) continue;
+        // Don't report posts that already existed on the first-ever run
+        if (indexing) continue;
 
         // Only process verified trades
         if (!update.verifiedTrade) continue;
 
+        // Only the requested portfolios
+        if (portfolioFilter && !portfolioFilter.has(update.portfolio?.id)) continue;
+
+        // A missing direction used to be reported as "short"; skip it instead.
+        if (typeof update.directionLong !== 'boolean') {
+          console.log(JSON.stringify({
+            type: 'skipped',
+            poll: pollCount,
+            postId: post.id,
+            coin: update.ticker,
+            reason: 'Post has no trade direction (directionLong missing)',
+          }));
+          continue;
+        }
+
         const isOpen = update.isOpen === true;
         const isClosed = update.isOpen === false && update.closingPrice != null;
-        const isIncrease = update.changes?.isAdded === false && isOpen;
 
         let action: string;
         if (isClosed) action = 'close';
@@ -102,6 +185,8 @@ async function main() {
           type: 'signal',
           poll: pollCount,
           postId: post.id,
+          postedAt: post.createdAt ?? null,
+          ageSeconds: ageSeconds(post.createdAt),
           action,
           owner: {
             id: update.owner?.id ?? post.owner?.id,
@@ -134,12 +219,21 @@ async function main() {
         }));
         signalFound = true;
       }
-
-      if (isFirstFeedPoll) {
-        isFirstFeedPoll = false;
-      }
+      feedOk = true;
+      feedFailures = 0;
     } catch (e: any) {
-      console.error(JSON.stringify({ type: 'error', source: 'feed', message: e.message }));
+      feedFailures++;
+      console.error(JSON.stringify({ type: 'error', source: 'feed', consecutiveFailures: feedFailures, message: e.message }));
+      if (feedFailures >= MAX_CONSECUTIVE_FAILURES) giveUp('feed', feedFailures, e.message);
+    }
+
+    // Indexing ends once the feed has been read successfully
+    if (indexing && feedOk) indexing = false;
+
+    try {
+      saveState(seenPosts, seenUpdates);
+    } catch (e: any) {
+      console.error(JSON.stringify({ type: 'error', source: 'state', message: `Could not save ${STATE_FILE}: ${e.message}` }));
     }
 
     return signalFound;
@@ -154,18 +248,16 @@ async function main() {
     waitForSignal: waitMode,
     watchEntries: watchEntries.length,
     portfolioIds: portfolioIds.length,
+    feedFilter: portfolioFilter ? 'listed portfolios only' : 'all followed traders',
+    resumedFromState: saved !== null,
+    stateFile: STATE_FILE,
   }));
 
-  // First poll: index existing posts so we only react to new ones
-  await poll();
-
+  // A restart reports anything missed while it was down, so check right away.
   while (true) {
-    await new Promise(r => setTimeout(r, FEED_INTERVAL));
     const found = await poll();
-
-    if (waitMode && found) {
-      process.exit(0);
-    }
+    if (waitMode && found) process.exit(0);
+    await new Promise(r => setTimeout(r, POLL_INTERVAL));
   }
 }
 
