@@ -54,9 +54,59 @@ export async function getPositions(wallet: string) {
     .map((p: any) => p.position);
 }
 
+/** Free margin and positions for a wallet (Hyperliquid clearinghouseState). */
+export async function getAccountState(wallet: string) {
+  const resp = await fetch('https://api.hyperliquid.xyz/info', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type: 'clearinghouseState', user: wallet }),
+  });
+  const data = await resp.json();
+  return {
+    withdrawable: parseFloat(data.withdrawable ?? '0'),
+    positions: (data.assetPositions ?? [])
+      .filter((p: any) => parseFloat(p.position.szi) !== 0)
+      .map((p: any) => p.position),
+  };
+}
+
+/** The SDK returns Hyperliquid's {status:'err'} answers instead of throwing; turn them into errors. */
+function assertOk(result: any, action: string) {
+  if (!result || result.status !== 'ok') {
+    const reason = typeof result?.response === 'string' ? result.response : JSON.stringify(result);
+    throw new Error(`Hyperliquid rejected ${action}: ${reason}`);
+  }
+  return result;
+}
+
 export async function setLeverage(coin: string, leverage: number) {
   const s = getSdk();
-  return s.exchange.updateLeverage(toSdkCoin(coin), 'isolated', leverage);
+  const result = await s.exchange.updateLeverage(toSdkCoin(coin), 'isolated', leverage);
+  return assertOk(result, `leverage ${leverage}x on ${coin}`);
+}
+
+export type OrderOutcome =
+  | { kind: 'filled'; filledSz: number; avgPx: number; oid: number }
+  | { kind: 'resting'; oid: number }
+  | { kind: 'error'; error: string };
+
+/** Read the per-order status out of an order response (filled / resting / error). */
+export function parseOrderOutcome(result: any): OrderOutcome {
+  if (!result || result.status !== 'ok') {
+    const reason = typeof result?.response === 'string' ? result.response : JSON.stringify(result);
+    return { kind: 'error', error: reason };
+  }
+  const st = result.response?.data?.statuses?.[0];
+  if (st?.filled) {
+    return {
+      kind: 'filled',
+      filledSz: parseFloat(st.filled.totalSz),
+      avgPx: parseFloat(st.filled.avgPx),
+      oid: st.filled.oid,
+    };
+  }
+  if (st?.resting) return { kind: 'resting', oid: st.resting.oid };
+  return { kind: 'error', error: st?.error ?? `Unrecognised order response: ${JSON.stringify(result)}` };
 }
 
 export async function placeMarketOrder(
