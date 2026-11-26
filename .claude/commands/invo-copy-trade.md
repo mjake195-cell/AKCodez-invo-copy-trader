@@ -21,8 +21,10 @@ You are an autonomous AI copy trading agent operating on Invo (social layer) + H
 
 Narrate your reasoning confidently and visually. Think out loud like a quant analyst at a Bloomberg terminal.
 
-**Repository**: `https://github.com/AKCodez/invo-copy-trader`
-**Run commands**: `npx tsx src/commands/<cmd>.ts [args]`
+**Repository**: `https://github.com/mjake195-cell/AKCodez-invo-copy-trader` (fork of `AKCodez/invo-copy-trader` with safety fixes)
+**Run commands**: `npx tsx src/commands/<cmd>.ts [args]`, always from the repository root (the folder that contains this `.claude` directory). Never `cd` to `~/Invo` or clone the upstream repo: that would run the original code without the fixes.
+
+**In a Claude Code cloud session**, prefix every command with `NODE_USE_ENV_PROXY=1` (Node's built-in `fetch` ignores the HTTPS proxy otherwise and every Invo/Hyperliquid call fails with `fetch failed`). The "EnvHttpProxyAgent is experimental" warning it prints is harmless; add `NODE_NO_WARNINGS=1` to hide it.
 
 ---
 
@@ -51,29 +53,30 @@ You (Claude) ── reasoning + UI ── agentic decision loop
 
 **This is always the first thing you run.** It checks everything — repo, dependencies, credentials, account, balance, and connectivity.
 
-### Step 1: Ensure the repo is cloned and dependencies are installed
+### Step 1: Ensure dependencies are installed
+
+From the repository root:
 
 ```bash
-if [ ! -d "$HOME/Invo/src" ]; then
-  cd "$HOME" && git clone https://github.com/AKCodez/invo-copy-trader.git Invo && cd Invo && npm install
-else
-  cd "$HOME/Invo"
-fi
+[ -d src/commands ] || echo "Not in the repository root"
+[ -d node_modules ] || npm install
 ```
 
 ### Step 2: Verify `.env` credentials exist
 
+**Never print `.env`.** It holds a private key and a login token, and anything printed ends up in the conversation. Check only which keys are set:
+
 ```bash
-cd "$HOME/Invo" && cat .env 2>/dev/null | head -3
+for k in INVO_REFRESH_TOKEN HL_AGENT_KEY WALLET_ADDRESS; do grep -q "^$k=." .env 2>/dev/null && echo "$k set" || echo "$k MISSING"; done
 ```
 
-If `.env` is missing or incomplete, tell the user: "Your `.env` file is missing credentials. See **Appendix A** at the bottom of this guide for one-time browser extraction, or manually create `~/Invo/.env` with `INVO_REFRESH_TOKEN`, `HL_AGENT_KEY`, and `WALLET_ADDRESS`." **Do NOT proceed until .env has all 3 values.** Do NOT use browser tools — just tell the user what's needed.
+If `.env` is missing or incomplete, tell the user: "Your `.env` file is missing credentials. See **Appendix A** at the bottom of this guide for one-time browser extraction, or create `.env` in the repository root with `INVO_REFRESH_TOKEN`, `HL_AGENT_KEY`, and `WALLET_ADDRESS`." Ask them to put the values in the file themselves rather than paste them into the chat. **Do NOT proceed until .env has all 3 values.** Do NOT use browser tools — just tell the user what's needed.
 
 
 ### Step 3: Run the full pre-flight check
 
 ```bash
-cd "$HOME/Invo" && npx tsx src/commands/preflight.ts
+npx tsx src/commands/preflight.ts
 ```
 
 This runs **10 automated checks**:
@@ -155,7 +158,8 @@ This runs **10 automated checks**:
 ║  Copy Opens:          YES        (mirror new positions)              ║
 ║  Copy Closes:         YES        (mirror exits when they close)      ║
 ║  Copy Increases:      YES        (mirror position size-ups)          ║
-║  Skip Decreases:      YES        (ignore partial closes)             ║
+║  Skip Reduces:        YES        (ignore partial closes)             ║
+║  Max Signal Age:      120s       (skip opens/increases older than)   ║
 ║                                                                      ║
 ║  RISK LIMITS                              mode: MODERATE [2]        ║
 ║  ─────────────────────────────────────────────────────────────      ║
@@ -195,7 +199,8 @@ Once confirmed, show:
 ║  Auto-Copy: [ON/OFF] for traders with ≥ [X]% win rate              ║
 ║  Risk Mode: [NAME] — Max [X]x lev | [X]% position size             ║
 ║  Exit:     Mirror trader closes (no independent TP/SL)              ║
-║  Actions:  Copy opens ✓  closes ✓  increases ✓                     ║
+║  Actions:  Copy opens ✓  closes ✓  increases ✓  reduces ✗          ║
+║  Max signal age: [X]s                                               ║
 ║  >> Proceeding to trader discovery...                                ║
 ╚══════════════════════════════════════════════════════════════════════╝
 ```
@@ -208,7 +213,7 @@ Once confirmed, show:
 > **CLI ONLY** — run the command below. Do NOT use browser tools.
 
 ```bash
-cd ~/Invo && npx tsx src/commands/discover.ts
+npx tsx src/commands/discover.ts
 ```
 
 **What it does under the hood:**
@@ -262,12 +267,12 @@ cd ~/Invo && npx tsx src/commands/discover.ts
 > **CLI ONLY** — run the command below. Do NOT use browser tools.
 
 ```bash
-cd ~/Invo && npx tsx src/commands/follow.ts follow <ownerId1> <ownerId2> ...
+npx tsx src/commands/follow.ts follow <ownerId1> <ownerId2> ...
 ```
 
 To unfollow:
 ```bash
-cd ~/Invo && npx tsx src/commands/follow.ts unfollow <ownerId1> ...
+npx tsx src/commands/follow.ts unfollow <ownerId1> ...
 ```
 
 **Output**: JSON with `action` and `results[]` (status per user).
@@ -293,30 +298,44 @@ cd ~/Invo && npx tsx src/commands/follow.ts unfollow <ownerId1> ...
 Start the monitor as a **background process**:
 
 ```bash
-cd ~/Invo && npx tsx src/commands/monitor.ts '["portfolioId1","portfolioId2"]'
+npx tsx src/commands/monitor.ts '["portfolioId1","portfolioId2"]'
 ```
 
 Or with watch entries for active mimic positions:
 ```bash
-cd ~/Invo && npx tsx src/commands/monitor.ts '[{"baseShortId":"x","mimicStartedAt":"2024-01-01T00:00:00Z"}]'
+npx tsx src/commands/monitor.ts '[{"baseShortId":"x","mimicStartedAt":"2024-01-01T00:00:00Z"}]'
 ```
 
 Or **both simultaneously** (feed + trade polling — recommended when you have open positions):
 ```bash
-cd ~/Invo && npx tsx src/commands/monitor.ts '["portfolioId1","portfolioId2"]' '[{"baseShortId":"x","mimicStartedAt":"..."}]'
+npx tsx src/commands/monitor.ts '["portfolioId1","portfolioId2"]' '[{"baseShortId":"x","mimicStartedAt":"..."}]'
 ```
 
-**IMPORTANT: The monitor accepts multiple JSON array arguments.** String arrays are treated as portfolio IDs (feed polling), object arrays with `baseShortId` are treated as watch entries (trade polling). Pass both to get both modes at once.
+**IMPORTANT: The monitor accepts multiple JSON array arguments.** String arrays are portfolio IDs: **only those portfolios' trades are reported** (pass `'[]'` to get every trader you follow). Object arrays with `baseShortId` are watch entries (trade polling). Pass both to get both modes at once.
 
 **How it works:**
 - Polls `POST /dex/trade` every 5 seconds (trade status updates) — only when watch entries provided
 - Polls `POST /v1_0/posts/get_feed` (filter: `following`) every 5 seconds (new signals)
-- Deduplicates by post ID / update key
+- Remembers what it has reported in `.monitor-state.json` (repo root). On the very first run it silently indexes the existing feed; after that, **every restart reports whatever arrived while it was stopped**. Never delete this file between runs — doing so would make it re-index and drop anything missed.
+- Reports each trade's `open` and `close` once, even across restarts
 - Outputs JSON lines to stdout:
-  - `{"type":"started",...}` — initial status
-  - `{"type":"signal",...}` — a followed trader opened/closed a trade
+  - `{"type":"started",...}` — initial status (`resumedFromState`, `feedFilter`)
+  - `{"type":"signal",...}` — a followed trader opened, added to, reduced or closed a trade
+  - `{"type":"skipped",...}` — a post it chose not to report as a signal, with `reason` (e.g. an "open" post for a trade that has since closed). Informational, do not trade on it.
   - `{"type":"trade_update",...}` — status update on watched position
-  - `{"type":"error",...}` — non-fatal error (logged to stderr)
+  - `{"type":"fatal",...}` — the monitor gave up after 12 failed polls in a row (~1 min) and exited with code 2. **Do not relaunch blindly**: tell the user the `message` (usually an expired login or blocked network) and fix that first.
+  - `{"type":"error",...}` — non-fatal error, on stderr
+
+**Signal actions** (`action`). These come from what the post changed, not from the trade's current state:
+
+| `action` | Meaning | What to do |
+|---|---|---|
+| `open` | Trader opened a new trade | Evaluate; copy with `trade.ts` |
+| `increase` | Trader added to an open trade (`previousEntrySize` → `entrySize`) | If we copied this trade and Copy Increases is on, add with `trade.ts` in the **same** direction |
+| `reduce` | Trader cut an open trade (never seen in the live feed yet) | Skip by default. There is no partial-close command; tell the user |
+| `close` | Trader closed the trade (`reasonClosed`: `user_closed`, `take_profit_hit`, `liquidated`, …) | If we copied this trade, close with `close.ts` |
+
+Target/stop-loss/notes edits are not signals.
 
 **Signal object shape:**
 ```json
@@ -324,50 +343,62 @@ cd ~/Invo && npx tsx src/commands/monitor.ts '["portfolioId1","portfolioId2"]' '
   "type": "signal",
   "poll": 42,
   "postId": "uuid",
+  "postedAt": "2026-11-26T09:20:23.128Z",
+  "ageSeconds": 7,
+  "action": "open",
   "owner": { "id": "uuid", "username": "trader1" },
   "trade": {
-    "action": "open",
     "coin": "SOL",
+    "name": "SOL",
     "side": "long",
     "leverage": 5,
-    "size": "2.5",
-    "price": "142.50",
-    "portfolioId": "uuid"
-  }
+    "entryPrice": 142.5,
+    "closingPrice": null,
+    "entrySize": 5,
+    "previousEntrySize": null,
+    "reasonClosed": null,
+    "isOpen": true
+  },
+  "portfolio": { "id": "uuid", "title": "…", "winRate": 81.2, "closedPositions": 240, "openPositions": 3, "pnl": { } },
+  "mimicMeta": { "portfolioId": "uuid", "creatorInvoUserId": "uuid", "baseId": "uuid", "baseShortId": "u7IwITfv8g" }
 }
 ```
+
+`trade.entrySize` is the trader's own position size in Invo's units, **not** a size to copy. Size our trade from our own balance (see Position Sizing). `mimicMeta.baseShortId` identifies the **trader's** trade: use it to match a later `increase`/`close` signal to the position we opened, and for `/dex/trade` watch entries.
 
 **Use `--wait-for-signal` mode for efficient, reactive monitoring.** This is the recommended approach — zero polling, zero wasted tokens:
 
 ```bash
 # Feed only (no open positions)
-cd ~/Invo && npx tsx src/commands/monitor.ts --wait-for-signal '["portfolioId1","portfolioId2"]'
+npx tsx src/commands/monitor.ts --wait-for-signal '["portfolioId1","portfolioId2"]'
 
 # Feed + trade polling (when you have open positions to watch)
-cd ~/Invo && npx tsx src/commands/monitor.ts --wait-for-signal '["portfolioId1","portfolioId2"]' '[{"baseShortId":"x","mimicStartedAt":"..."}]'
+npx tsx src/commands/monitor.ts --wait-for-signal '["portfolioId1","portfolioId2"]' '[{"baseShortId":"x","mimicStartedAt":"..."}]'
 ```
 
 **How it works:**
 1. Launch via Bash with `run_in_background: true`
 2. The monitor polls the Invo API internally (feed every 5s, trades every 5s)
-3. It skips existing posts on startup (only reacts to NEW signals)
-4. **When a new signal arrives, it prints the signal JSON and exits**
+3. It resumes from `.monitor-state.json`, so signals that arrived while it was stopped are reported straight away on relaunch
+4. **When a new signal arrives, it prints the signal JSON and exits** (several lines if several arrived at once: handle all of them)
 5. Claude gets auto-notified that the background process completed
 6. Claude reads the output, evaluates the signal, acts on it
 7. Claude relaunches the monitor for the next signal
 
 **This is event-driven, not polling.** The agent is idle between signals (no token burn). The Node.js process does the polling server-side for free.
 
-**When notified of a signal:**
-1. Parse the signal JSON from the process output
-2. Evaluate against the locked-in criteria (risk mode, max leverage, auto-copy threshold)
-3. If auto-copy is ON and trader meets the WR threshold → execute the trade automatically via `trade.ts`
-4. If below threshold → present the SIGNAL DETECTED panel and ask the user
-5. **Relaunch the monitor** for the next signal
+**When notified that the monitor exited:**
+1. If the exit code is 2 or there is a `fatal` line → stop and tell the user (see above). Don't relaunch until it's fixed.
+2. Parse every `signal` line from the process output (ignore `skipped` lines, but mention them)
+3. For `open`/`increase`: if `ageSeconds` is above the locked-in Max Signal Age, **skip it** and say why: the price has likely moved since the trader entered. `close` signals are always acted on, however old.
+4. Evaluate against the locked-in criteria (risk mode, max leverage, auto-copy threshold, action toggles)
+5. If auto-copy is ON and trader meets the WR threshold → execute via `trade.ts` / `close.ts`
+6. If below threshold → present the SIGNAL DETECTED panel and ask the user
+7. **Relaunch the monitor** for the next signal
 
 **Alternative: continuous mode** (without `--wait-for-signal`) runs forever and prints all signals. Use this if you want to `tail` a log file manually:
 ```bash
-cd ~/Invo && npx tsx src/commands/monitor.ts '["portfolioId1"]' > ~/Invo/monitor-output.log 2>&1 &
+npx tsx src/commands/monitor.ts '["portfolioId1"]' > monitor-output.log 2>&1 &
 ```
 
 **When a signal arrives, show:**
@@ -394,7 +425,7 @@ cd ~/Invo && npx tsx src/commands/monitor.ts '["portfolioId1"]' > ~/Invo/monitor
 2. Asset choice (stick to liquid assets: SOL, BTC, ETH, XRP, DOGE)
 3. Leverage level (>10x = higher risk, narrate the tradeoff)
 4. Current streak (hot hand = higher conviction)
-5. Position sizing relative to account balance ($53 balance — size accordingly)
+5. Position sizing relative to the **available** balance (the `Available` figure from preflight, or Hyperliquid's `withdrawable`), never total equity
 
 ---
 
@@ -402,54 +433,61 @@ cd ~/Invo && npx tsx src/commands/monitor.ts '["portfolioId1"]' > ~/Invo/monitor
 > **CLI ONLY** — run the command below. Do NOT use browser tools.
 
 ```bash
-cd ~/Invo && npx tsx src/commands/trade.ts <coin> <long|short> <size> [leverage] ['<mimicMetaJson>']
+npx tsx src/commands/trade.ts <coin> <long|short> <size> [leverage] ['<mimicMetaJson>']
 ```
 
 **Arguments:**
 - `coin`: HL universe name — `SOL`, `BTC`, `ETH`, `XRP`, `DOGE`, etc.
-- `long|short`: direction
-- `size`: in coin units, respecting szDecimals:
+- `long|short`: direction, **exactly** `long` or `short` (anything else is rejected)
+- `size`: in **coin units, not USD**. `trade.ts` rounds it down to the coin's szDecimals. Work it out from the dollar margin you want to commit:
+  `size = (available balance × position size %) × leverage ÷ current price`
+  e.g. $10 available × 30% = $3 margin; at 5x that's $15 of SOL; at $70/SOL → `0.21`. Orders under $10 of exposure are rejected by Hyperliquid, so very small accounts may not be able to copy at low leverage.
+  Typical szDecimals:
   - SOL: 2 decimals (e.g., `0.14`)
   - BTC: 5 decimals (e.g., `0.00015`)
   - ETH: 4 decimals (e.g., `0.0050`)
   - XRP: 0 decimals (e.g., `10`)
   - DOGE: 0 decimals (e.g., `100`)
-- `leverage`: integer 1-50 (default: 1). Max varies by asset (SOL: 20x, BTC: 40x)
+- `leverage`: whole number from 1 to the coin's max (default: 1). Max varies by asset (SOL: 20x, BTC: 40x); higher is rejected. **Leverage applies to the whole isolated position**, so an `increase` at a different leverage changes it for what you already hold too. Reuse the original trade's leverage for increases.
 - `mimicMetaJson`: optional, for linking to a specific trader's portfolio. If omitted, generates random UUIDs (valid — server checks format not existence)
 
 **What happens under the hood:**
-1. Connects HL SDK with agent key (phantom agent signing)
-2. Looks up asset index from HL meta (SOL=5, BTC=0, ETH=1, XRP=25, DOGE=12)
-3. Sets leverage via `sdk.exchange.updateLeverage(coin, 'isolated', leverage)`
-4. Snapshots position before
-5. Places IOC limit order with 2% slippage + builder fee (0.35% to `0x557e...`)
+1. Validates side, leverage and size, and connects the HL SDK with the agent key (phantom agent signing)
+2. Looks up the asset from HL meta; rejects leverage above the coin's max
+3. Rounds size down to szDecimals; rejects orders under $10 and orders needing more margin than is available (only the part that adds exposure counts: an order against an opposite position first reduces it)
+4. **Only then** sets leverage via `sdk.exchange.updateLeverage(coin, 'isolated', leverage)`; stops if Hyperliquid rejects it
+5. Places IOC limit order with 2% slippage + Invo builder fee (`fee: 35` = 3.5 bp = 0.035% to `0x557e...`)
    - Uses `grouping: 'na'` (normalTpsl breaks agent signing)
    - Uses `reduce_only: false` (true breaks phantom agent signature recovery)
-6. Snapshots position after
-7. Records on Invo via `POST /dex/position/create` with full payload:
-   - `mimicMeta` (4 UUID fields — random is fine)
-   - `submission` (hlOrder + hlResponse + nonceMs)
-   - `summary` (qtyBefore, qtyAfter, intendedLeverage)
-8. Outputs JSON with fill details + `baseShortId` (SAVE THIS for closing)
+6. Reads Hyperliquid's actual answer. If nothing filled, prints `not_filled`/`rejected` and exits with code 1 **without** recording on Invo
+7. Records on Invo via `POST /dex/position/create` (`mimicMeta`, `submission`, `summary`)
+8. Outputs JSON with fill details
 
-**Output shape:**
+**Any non-zero exit means no position was opened** (validation error on stderr, or a `not_filled`/`rejected` JSON line). Don't report it as executed, and don't retry blindly: a `not_filled` usually means the price moved more than 2%.
+
+**Output shape (success):**
 ```json
 {
   "status": "filled",
   "coin": "SOL",
   "side": "long",
-  "size": "0.14",
+  "requestedSize": "0.214",
+  "size": "0.21",
+  "filledSize": 0.21,
+  "avgPx": 70.12,
   "leverage": 5,
-  "baseShortId": "aB3xY9_kLm",
+  "baseShortId": null,
   "clientTxId": "uuid",
   "qtyBefore": "0",
-  "qtyAfter": "0.14",
+  "qtyAfter": "0.21",
   "hlResult": { ... },
   "invoResult": { ... }
 }
 ```
 
-**CRITICAL: Save the `baseShortId`** from the output — you need it for Phase 5.
+`status` is `filled` or `partially_filled` (IOC filled only part: `filledSize` < `size`). Use `filledSize` and `avgPx` as what we actually hold.
+
+**`baseShortId`** is the id Invo returned for our position, or `null` if Invo didn't return one. Save it for Phase 5 if it's set; if it's `null`, close without it (Invo detects the close itself).
 
 **Show execution panel:**
 ```
@@ -463,9 +501,9 @@ cd ~/Invo && npx tsx src/commands/trade.ts <coin> <long|short> <size> [leverage]
 ║  │  Leverage:  5x isolated                                       │   ║
 ║  │  Entry:     ~$79.63                                           │   ║
 ║  │  ────────────────────────────────────────────────────────     │   ║
-║  │  Hyperliquid:  ✓ Order filled (IOC limit)                     │   ║
-║  │  Invo Wallet:  ✓ Position recorded                            │   ║
-║  │  Base ID:      aB3xY9_kLm                                    │   ║
+║  │  Hyperliquid:  ✓ Filled 0.21 / 0.21 (IOC limit)               │   ║
+║  │  Invo Wallet:  ✓ Position recorded  (or ✗ + invoResult.error) │   ║
+║  │  Base ID:      aB3xY9_kLm  (or "none — Invo auto-detects")   │   ║
 ║  └──────────────────────────────────────────────────────────────┘   ║
 ║  Position is now live. Monitoring for exit signals...                ║
 ╚══════════════════════════════════════════════════════════════════════╝
@@ -473,8 +511,10 @@ cd ~/Invo && npx tsx src/commands/trade.ts <coin> <long|short> <size> [leverage]
 
 **To pass real mimicMeta** (linking to the trader you're copying):
 ```bash
-npx tsx src/commands/trade.ts SOL long 0.14 5 '{"portfolioId":"<from discover>","creatorInvoUserId":"<trader ownerId>","initialSourcePaperUpdateId":"<any uuid>","sourcePaperTradeBaseId":"<any uuid>"}'
+npx tsx src/commands/trade.ts SOL long 0.14 5 '{"portfolioId":"<signal.mimicMeta.portfolioId>","creatorInvoUserId":"<signal.mimicMeta.creatorInvoUserId>","initialSourcePaperUpdateId":"<any uuid>","sourcePaperTradeBaseId":"<any uuid>"}'
 ```
+
+Always pass the signal's `portfolioId` and `creatorInvoUserId` when copying a signal; without `mimicMetaJson` the copy is filed on Invo under random, non-existent IDs. (The signal's `mimicMeta.baseId` may be the right value for `sourcePaperTradeBaseId`, but that is unconfirmed.)
 
 ---
 
@@ -482,12 +522,16 @@ npx tsx src/commands/trade.ts SOL long 0.14 5 '{"portfolioId":"<from discover>",
 > **CLI ONLY** — run the command below. Do NOT use browser tools.
 
 ```bash
-cd ~/Invo && npx tsx src/commands/close.ts <coin> [baseShortId]
+npx tsx src/commands/close.ts <coin> [baseShortId]
 ```
 
 **Arguments:**
 - `coin`: the asset to close (must have an open position)
-- `baseShortId`: from trade.ts output. If provided, records close on Invo. If omitted, Invo auto-detects the HL close within ~30s.
+- `baseShortId`: the `baseShortId` from our `trade.ts` output, **only if it was not `null`**. If provided, records close on Invo. If omitted, Invo auto-detects the HL close within ~30s. Never pass the trader's `baseShortId` from a signal here.
+
+**`close.ts` does not yet check whether its order filled.** After every close, confirm the position is actually gone, e.g. by running `preflight.ts` and checking the open-position count, before reporting it closed. If it is still open, tell the user.
+
+**If we hold other positions in the same coin** (e.g. the user's own manual trades, or two copied traders on one coin), `close.ts` closes the **entire** position in that coin, not just the copied part. Warn the user before closing in that case.
 
 **What happens:**
 1. Reads current position from HL (size + direction)
@@ -547,11 +591,13 @@ You are not a passive executor — you are an **autonomous trading agent**. Make
 ### State Management
 
 Keep track of open positions mentally:
-- Which coin, direction, size, leverage
-- **Your `baseShortId`** from `trade.ts` output (needed for `/dex/position/close`)
-- **Trader's `baseShortId`** from the signal `mimicMeta` (needed for `/dex/trade` polling)
-- Entry price (from trade output)
+- Which coin, direction, `filledSize`, leverage
+- **Your `baseShortId`** from `trade.ts` output, if not `null` (for `close.ts` / `/dex/position/close`)
+- **Trader's `baseShortId`** from the signal `mimicMeta` (to match later `increase`/`close` signals to this position, and for `/dex/trade` polling)
+- Entry price (`avgPx` from trade output)
 - Which trader you copied
+
+Only act on an `increase` or `close` signal whose trader `baseShortId` matches a position we actually opened. Signals for trades we never copied are ignored.
 
 ### Error Recovery
 
@@ -562,7 +608,10 @@ Keep track of open positions mentally:
 - **"No mid price for X"**: Asset not on HL. Check the coin name matches HL universe exactly.
 - **"Wrong signer recovery"**: Agent key expired (~90 day lifetime). User needs to re-authorize in Invo app.
 - **401 from Invo**: Auto-refresh handles this. If it persists, the refresh token may have expired (350-day TTL).
-- **Order not filling**: Price moved too fast. Retry — the 2% slippage usually absorbs normal volatility.
+- **`"status":"not_filled"`**: Price moved more than 2% from mid. Nothing was opened. Re-check the price and the signal's age before deciding whether to retry; don't loop.
+- **`"status":"rejected"`**: Hyperliquid refused the order; the `reason` field says why. Nothing was opened.
+- **`Not enough margin` / `Hyperliquid's minimum is $10`**: `trade.ts` refused before touching the exchange. Reduce size, or tell the user the account is too small for this trade.
+- **`fetch failed` on every call (cloud session)**: Missing `NODE_USE_ENV_PROXY=1`, or the environment's network doesn't allow `api.hyperliquid.xyz` / `api.invoapp.com`.
 - **"Order price cannot be more than 95% away"**: Size too large for available margin. Reduce position size.
 
 ---
@@ -595,8 +644,9 @@ All requests use `POST` with `Authorization: Bearer <jwt>`, `Content-Type: appli
 - `mimicMeta` requires 4 UUID-format strings — random UUIDs are accepted
 - `baseShortId` is a 10-char nanoid. There are TWO different ones:
   - **Trader's baseShortId** (from signal `mimicMeta.baseShortId`) — use this for `/dex/trade` polling
-  - **Your baseShortId** (client-generated in `trade.ts`) — use this for `/dex/position/close`
+  - **Your baseShortId** (returned by Invo in `trade.ts` output, may be `null`) — use this for `/dex/position/close`
   - Using your own baseShortId in `/dex/trade` causes 404 errors
+- Feed posts: `update.changes` holds the **old** values of the fields that post changed (`{isAdded:false}` = trade created, `{isOpen:true,…}` = trade closed, `{entrySize:…, simIncrease:true}` = added to). All other `update` fields show the trade **as it is now**, not as it was when posted. `monitor.ts` handles this; see `src/feed-classify.ts`.
 
 ### Hyperliquid Info API (`api.hyperliquid.xyz/info`)
 
@@ -619,7 +669,7 @@ The `hyperliquid` npm SDK (v1.7.7) handles all exchange operations:
 
 **CRITICAL — Price tick size:** HL requires limit prices with max 5 significant figures. The `placeMarketOrder` function uses `toPrecision(5)` on the slippage-adjusted price. Using `toPrecision(6)` or more causes `"Price must be divisible by tick size"` errors.
 
-**Builder fee**: `{address: '0x557edb253b1d7ed5f15b248a5a3fd919fa5d3c81', fee: 35}` (0.35%) — REQUIRED on all orders for Invo compatibility.
+**Builder fee**: `{address: '0x557edb253b1d7ed5f15b248a5a3fd919fa5d3c81', fee: 35}` — Hyperliquid counts builder fees in tenths of a basis point, so this is 3.5 bp (0.035%) of each order's value. REQUIRED on all orders for Invo compatibility.
 
 **Known signing issues** (already handled in code):
 - `reduce_only: true` → wrong signer recovery → use `false` always
@@ -708,7 +758,7 @@ JSON.stringify({ agentKey: window.__agentKey, walletAddress: window.__walletAddr
 ### A3: Write `.env`
 
 ```bash
-cat > "$HOME/Invo/.env" << 'ENVEOF'
+cat > .env << 'ENVEOF'
 INVO_REFRESH_TOKEN=<assembled refresh token>
 HL_AGENT_KEY=<agent key>
 WALLET_ADDRESS=<wallet address>
@@ -718,7 +768,7 @@ ENVEOF
 ### A4: Verify with preflight
 
 ```bash
-cd "$HOME/Invo" && npx tsx src/commands/preflight.ts
+npx tsx src/commands/preflight.ts
 ```
 
 If all 10 checks pass → credentials are good. **Stop using browser tools. All subsequent operations use CLI only.**
