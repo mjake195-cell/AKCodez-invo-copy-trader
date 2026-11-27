@@ -182,13 +182,42 @@ async function main() {
   }
 
   const status = outcome.filledSz < size ? 'partially_filled' : 'filled';
-
-  const posAfter = await hl.getPositions(WALLET_ADDRESS);
-  const updated = posAfter.find((p: any) => p.coin === coin);
-  const qtyAfter = updated ? updated.szi : '0';
-
   const clientTxId = randomUUID();
   const realMimicMeta = mimicMeta ?? null; // only the caller's values identify the trader
+
+  // Record the fill in positions.json FIRST, before any further network call that
+  // could fail (e.g. a rate limit), so a filled position is never left unrecorded.
+  // A failure here doesn't undo the trade, so it is reported loudly, not thrown.
+  let ledgerError: string | null = null;
+  try {
+    recordOpenFill(ledger, {
+      coin,
+      side,
+      leverage,
+      add: addMode,
+      fill: { at: new Date().toISOString(), size: outcome.filledSz, px: outcome.avgPx, clientTxId },
+      source: {
+        traderBaseShortId,
+        portfolioId: realMimicMeta?.portfolioId ?? null,
+        creatorInvoUserId: realMimicMeta?.creatorInvoUserId ?? null,
+      },
+      invoPositionRecordId: null,
+    });
+    saveLedger(ledger);
+  } catch (e: any) {
+    ledgerError = `Position is open but was NOT saved to ${LEDGER_FILE}: ${e.message}`;
+    process.exitCode = 1;
+  }
+
+  // Read the position back (best-effort; if that fails, work it out from the fill).
+  let qtyAfter: string;
+  try {
+    const posAfter = await hl.getPositions(WALLET_ADDRESS);
+    const updated = posAfter.find((p: any) => p.coin === coin);
+    qtyAfter = updated ? updated.szi : '0';
+  } catch {
+    qtyAfter = (sziBefore + (isBuy ? outcome.filledSz : -outcome.filledSz)).toFixed(asset.szDecimals);
+  }
   if (!mimicMeta) {
     mimicMeta = {
       portfolioId: randomUUID(),
@@ -233,27 +262,13 @@ async function main() {
   // run without one (Invo then detects the close on its own).
   const baseShortId = findBaseShortId(invoResult);
 
-  // Record the fill in positions.json. Failure here doesn't undo the trade, so it is
-  // reported loudly in the output instead of thrown.
-  let ledgerError: string | null = null;
-  try {
-    recordOpenFill(ledger, {
-      coin,
-      side,
-      leverage,
-      add: addMode,
-      fill: { at: new Date().toISOString(), size: outcome.filledSz, px: outcome.avgPx, clientTxId },
-      source: {
-        traderBaseShortId,
-        portfolioId: realMimicMeta?.portfolioId ?? null,
-        creatorInvoUserId: realMimicMeta?.creatorInvoUserId ?? null,
-      },
-      invoPositionRecordId: invoResult?.data?.positionRecordId ?? null,
-    });
-    saveLedger(ledger);
-  } catch (e: any) {
-    ledgerError = `Position is open but was NOT saved to ${LEDGER_FILE}: ${e.message}`;
-    process.exitCode = 1;
+  // Add Invo's record id to the saved position (best-effort).
+  const invoRecordId = invoResult?.data?.positionRecordId ?? null;
+  if (!ledgerError && invoRecordId && !ledger.open[coin].invoPositionRecordId) {
+    try {
+      ledger.open[coin].invoPositionRecordId = invoRecordId;
+      saveLedger(ledger);
+    } catch { /* the position itself is already recorded */ }
   }
 
   console.log(JSON.stringify({

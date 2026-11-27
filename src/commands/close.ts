@@ -112,12 +112,20 @@ async function main() {
 
   // Read the position back. If it still shows the old size, give Hyperliquid a
   // moment to update and read it once more.
-  let qtyAfter = await currentSzi(coin);
-  if (qtyAfter === qtyBefore) {
-    await new Promise(r => setTimeout(r, 1000));
-    qtyAfter = await currentSzi(coin);
-  }
+  // If reading it back fails (e.g. a rate limit), work it out from the fill instead,
+  // so positions.json is still updated.
   const before = parseFloat(qtyBefore);
+  let qtyAfter: string;
+  try {
+    qtyAfter = await currentSzi(coin);
+    if (qtyAfter === qtyBefore) {
+      await new Promise(r => setTimeout(r, 1000));
+      qtyAfter = await currentSzi(coin);
+    }
+  } catch {
+    const remaining = before - Math.sign(before) * outcome.filledSz;
+    qtyAfter = Math.abs(remaining) < 1e-9 ? '0' : String(remaining);
+  }
   const after = parseFloat(qtyAfter);
 
   let status: 'closed' | 'partially_closed' | 'flipped';
