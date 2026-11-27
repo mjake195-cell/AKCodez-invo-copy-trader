@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto';
 import { validateEnv, INVO_TOKEN, INVO_REFRESH_TOKEN, HL_AGENT_KEY, WALLET_ADDRESS } from '../env.js';
 import * as invo from '../invo-client.js';
 import * as hl from '../hl-client.js';
+import { existingPositionRefusal } from '../position-guard.js';
 
 validateEnv();
 if (INVO_TOKEN) invo.setToken(INVO_TOKEN);
@@ -34,10 +35,14 @@ function findBaseShortId(obj: any): string | null {
 }
 
 async function main() {
-  const [coin, side, sizeStr, leverageStr, mimicMetaJson] = process.argv.slice(2);
+  const argv = process.argv.slice(2);
+  // --add: add to an existing position in this coin (for copying an "increase").
+  // Without it, any coin that already has an open position is refused.
+  const addMode = argv.includes('--add');
+  const [coin, side, sizeStr, leverageStr, mimicMetaJson] = argv.filter(a => a !== '--add');
 
   if (!coin || !side || !sizeStr) {
-    fail('Usage: trade <coin> <long|short> <size> [leverage] [mimicMetaJson]');
+    fail('Usage: trade <coin> <long|short> <size> [leverage] [mimicMetaJson] [--add]');
   }
 
   // --- Validate everything before touching the exchange ---
@@ -103,6 +108,12 @@ async function main() {
   const existing = account.positions.find((p: any) => p.coin === coin);
   const qtyBefore: string = existing ? existing.szi : '0';
   const sziBefore = parseFloat(qtyBefore);
+
+  // Never touch a position that's already open (e.g. the user's own manual trade)
+  // unless explicitly adding to it, and even then only in the same direction.
+  const refusal = existingPositionRefusal(coin, side, sziBefore, addMode);
+  if (refusal) fail(refusal);
+
   const sziAfter = sziBefore + (isBuy ? size : -size);
   const sameDirection = sziBefore !== 0 && Math.sign(sziAfter) === Math.sign(sziBefore);
   const addedExposure = Math.max(0, Math.abs(sziAfter) - (sameDirection ? Math.abs(sziBefore) : 0));

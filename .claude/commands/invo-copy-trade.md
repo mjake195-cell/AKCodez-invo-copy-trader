@@ -331,7 +331,7 @@ npx tsx src/commands/monitor.ts '["portfolioId1","portfolioId2"]' '[{"baseShortI
 | `action` | Meaning | What to do |
 |---|---|---|
 | `open` | Trader opened a new trade | Evaluate; copy with `trade.ts` |
-| `increase` | Trader added to an open trade (`previousEntrySize` → `entrySize`) | If we copied this trade and Copy Increases is on, add with `trade.ts` in the **same** direction |
+| `increase` | Trader added to an open trade (`previousEntrySize` → `entrySize`) | If we copied this trade and Copy Increases is on, add with `trade.ts … --add` in the **same** direction |
 | `reduce` | Trader cut an open trade (never seen in the live feed yet) | Skip by default. There is no partial-close command; tell the user |
 | `close` | Trader closed the trade (`reasonClosed`: `user_closed`, `take_profit_hit`, `liquidated`, …) | If we copied this trade, close with `close.ts` |
 
@@ -433,8 +433,10 @@ npx tsx src/commands/monitor.ts '["portfolioId1"]' > monitor-output.log 2>&1 &
 > **CLI ONLY** — run the command below. Do NOT use browser tools.
 
 ```bash
-npx tsx src/commands/trade.ts <coin> <long|short> <size> [leverage] ['<mimicMetaJson>']
+npx tsx src/commands/trade.ts <coin> <long|short> <size> [leverage] ['<mimicMetaJson>'] [--add]
 ```
+
+**Existing positions are protected.** Without `--add`, `trade.ts` refuses any coin that already has an open position, whoever opened it (e.g. the user's own manual trades). Use `--add` **only** to copy an `increase` signal for a position this agent opened and is tracking; it is refused unless a position in that coin is already open in the **same** direction, so it can never reduce or flip a position.
 
 **Arguments:**
 - `coin`: HL universe name — `SOL`, `BTC`, `ETH`, `XRP`, `DOGE`, etc.
@@ -448,7 +450,7 @@ npx tsx src/commands/trade.ts <coin> <long|short> <size> [leverage] ['<mimicMeta
   - ETH: 4 decimals (e.g., `0.0050`)
   - XRP: 0 decimals (e.g., `10`)
   - DOGE: 0 decimals (e.g., `100`)
-- `leverage`: whole number from 1 to the coin's max (default: 1). Max varies by asset (SOL: 20x, BTC: 40x); higher is rejected. **Leverage applies to the whole isolated position**, so an `increase` at a different leverage changes it for what you already hold too. Reuse the original trade's leverage for increases.
+- `leverage`: whole number from 1 to the coin's max (default: 1). Max varies by asset (SOL: 20x, BTC: 40x); higher is rejected. **Leverage applies to the whole isolated position**, so an `increase` at a different leverage changes it for what you already hold too. Reuse the original trade's leverage for increases, and pass `--add`.
 - `mimicMetaJson`: optional, for linking to a specific trader's portfolio. If omitted, generates random UUIDs (valid — server checks format not existence)
 
 **What happens under the hood:**
@@ -619,6 +621,8 @@ Only act on an `increase` or `close` signal whose trader `baseShortId` matches a
 - **401 from Invo**: Auto-refresh handles this. If it persists, the refresh token may have expired (350-day TTL).
 - **`"status":"not_filled"`**: Price moved more than 2% from mid. Nothing was opened. Re-check the price and the signal's age before deciding whether to retry; don't loop.
 - **`"status":"rejected"`**: Hyperliquid refused the order; the `reason` field says why. Nothing was opened.
+- **`Refusing: there is already an open … position`**: the coin already has a position, probably the user's own manual trade. Skip the signal and tell the user; never retry with `--add` unless it's a position this agent opened.
+- **`Refusing --add: …`**: there's no position to add to, or it's in the other direction. Skip the increase.
 - **`Not enough margin` / `Hyperliquid's minimum is $10`**: `trade.ts` refused before touching the exchange. Reduce size, or tell the user the account is too small for this trade.
 - **`fetch failed` on every call (cloud session)**: Missing `NODE_USE_ENV_PROXY=1`, or the environment's network doesn't allow `api.hyperliquid.xyz` / `api.invoapp.com`.
 - **"Order price cannot be more than 95% away"**: Size too large for available margin. Reduce position size.
