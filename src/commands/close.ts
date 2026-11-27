@@ -14,6 +14,8 @@ async function currentSzi(coin: string): Promise<string> {
   return pos ? pos.szi : '0';
 }
 
+const MIN_NOTIONAL_USD = 10; // Hyperliquid rejects orders below $10
+
 function fail(message: string): never {
   console.error(message);
   process.exit(1);
@@ -34,11 +36,20 @@ async function main() {
   // --force: close a position this agent did not open, or whose size someone else
   // changed. Only when the user explicitly asks for it.
   const force = argv.includes('--force');
-  const unknownFlag = argv.find(a => a.startsWith('--') && a !== '--force');
+  // --size=<coins>: close only part of the position (to copy a trader's reduce).
+  const sizeArg = argv.find(a => a.startsWith('--size='));
+  const unknownFlag = argv.find(a => a.startsWith('--') && a !== '--force' && !a.startsWith('--size='));
   if (unknownFlag) fail(`Unknown option ${unknownFlag}`);
   const [coin, baseShortId] = argv.filter(a => !a.startsWith('--'));
 
-  if (!coin) fail('Usage: close <coin> [baseShortId] [--force]');
+  if (!coin) fail('Usage: close <coin> [baseShortId] [--force] [--size=<coins>]');
+  let requestedReduce: number | null = null;
+  if (sizeArg) {
+    requestedReduce = Number(sizeArg.slice('--size='.length));
+    if (!Number.isFinite(requestedReduce) || requestedReduce <= 0) {
+      fail(`Invalid ${sizeArg}: must be a positive number of ${coin} (coin units)`);
+    }
+  }
 
   let ledger: Ledger;
   try {
@@ -91,9 +102,33 @@ async function main() {
   const assetIndex = meta.universe.findIndex(a => a.name === coin);
   if (assetIndex < 0) throw new Error(`Unknown coin: ${coin}`);
 
-  // Close on HL
+  // Partial close: round down to the coin's decimals. A size covering the whole
+  // position is treated as a full close.
+  const beforeAbs = Math.abs(parseFloat(qtyBefore));
+  let reduceWire: string | null = null;
+  if (requestedReduce !== null) {
+    const dec = meta.universe[assetIndex].szDecimals;
+    const f = 10 ** dec;
+    const reduce = Math.floor(requestedReduce * f + 1e-9) / f;
+    if (reduce <= 0) fail(`--size=${requestedReduce} rounds to 0 at ${coin}'s ${dec} decimals`);
+    if (reduce < beforeAbs && !sameSize(reduce, beforeAbs)) {
+      const mid = parseFloat((await hl.getAllMids())[coin]);
+      if (!mid) fail(`No mid price for ${coin}`);
+      if (reduce * mid < MIN_NOTIONAL_USD) {
+        fail(
+          `Reduce of ${reduce.toFixed(dec)} ${coin} is $${(reduce * mid).toFixed(2)}; ` +
+          `Hyperliquid's minimum order is $${MIN_NOTIONAL_USD}. Position left unchanged`,
+        );
+      }
+      reduceWire = reduce.toFixed(dec);
+    }
+  }
+
+  // Close (or reduce) on HL: the order goes the opposite way to the position.
   const nonceMs = Date.now();
-  const closeResult = await hl.closePosition(coin, WALLET_ADDRESS);
+  const closeResult = reduceWire
+    ? await hl.placeMarketOrder(coin, parseFloat(qtyBefore) < 0, reduceWire, 0.02)
+    : await hl.closePosition(coin, WALLET_ADDRESS);
 
   // Report what actually happened instead of always "closed".
   const outcome = hl.parseOrderOutcome(closeResult);
@@ -128,10 +163,13 @@ async function main() {
   }
   const after = parseFloat(qtyAfter);
 
-  let status: 'closed' | 'partially_closed' | 'flipped';
+  let status: 'closed' | 'partially_closed' | 'reduced' | 'partially_reduced' | 'flipped';
   if (after === 0) status = 'closed';
-  else if (Math.sign(after) === Math.sign(before)) status = 'partially_closed';
-  else status = 'flipped'; // the position changed between reading it and closing it
+  else if (Math.sign(after) !== Math.sign(before)) status = 'flipped'; // the position changed while closing
+  else if (reduceWire) {
+    // An intentional reduce: did the whole reduce fill?
+    status = sameSize(Math.abs(after), beforeAbs - parseFloat(reduceWire)) ? 'reduced' : 'partially_reduced';
+  } else status = 'partially_closed';
 
   // Record on Invo (best-effort — Invo auto-detects HL closes). Only a full close is
   // recorded, so Invo never shows a position as closed while part of it is still open.
@@ -164,6 +202,7 @@ async function main() {
   } else if (mine) {
     mine.size = Math.abs(after);
     mine.updatedAt = now;
+    mine.fills.push({ at: now, size: -outcome.filledSz, px: outcome.avgPx, clientTxId: 'reduce' });
   }
   const ledgerError = saveOrReport(ledger);
 
@@ -179,8 +218,8 @@ async function main() {
     invoResult,
   }));
 
-  // Anything other than a full close needs attention.
-  if (status !== 'closed') process.exitCode = 1;
+  // Anything other than what was asked for needs attention.
+  if (status !== 'closed' && status !== 'reduced') process.exitCode = 1;
 }
 
 // Exit once output is flushed: the Hyperliquid SDK leaves connections open that

@@ -3,6 +3,27 @@ import { resolve } from 'path';
 import { validateEnv, INVO_TOKEN, INVO_REFRESH_TOKEN } from '../env.js';
 import * as invo from '../invo-client.js';
 import { classify } from '../feed-classify.js';
+import { parseTradeUpdates } from '../trade-updates.js';
+import { loadLedger } from '../ledger.js';
+
+/**
+ * The copied trades this agent holds, from positions.json: which trader trade
+ * each came from, and since when (only updates after we copied it matter).
+ */
+function heldTrades() {
+  const entries: { baseShortId: string; mimicStartedAt: string }[] = [];
+  const coinBySource = new Map<string, string>();
+  try {
+    for (const p of Object.values(loadLedger().open)) {
+      if (!p.source.traderBaseShortId) continue;
+      entries.push({ baseShortId: p.source.traderBaseShortId, mimicStartedAt: p.openedAt });
+      coinBySource.set(p.source.traderBaseShortId, p.coin);
+    }
+  } catch (e: any) {
+    return { entries, coinBySource, error: `Cannot read positions.json: ${e.message}` };
+  }
+  return { entries, coinBySource, error: null as string | null };
+}
 
 validateEnv();
 if (INVO_TOKEN) invo.setToken(INVO_TOKEN);
@@ -123,18 +144,51 @@ async function main() {
     let signalFound = false;
     let feedOk = false;
 
-    // Poll /dex/trade if we have watch entries
-    if (isWatchEntries) {
+    // Poll /dex/trade for the trades we copied (from positions.json, re-read every
+    // poll) plus any watch entries given on the command line. This is the only
+    // place a trader's partial closes show up; the feed never posts them.
+    const held = heldTrades();
+    // Without positions.json we can't watch the trades we hold, so stop rather than
+    // silently miss their reduces and closes.
+    if (held.error) giveUp('positions', 1, held.error);
+    const entries = [...watchEntries, ...held.entries.filter(e => !watchEntries.some(w => w.baseShortId === e.baseShortId))];
+    if (entries.length > 0) {
       try {
-        const data = await invo.getTradeUpdates(watchEntries);
-        const items = (data as any).investments ?? (data as any).items ?? [];
-        for (const item of items) {
-          const key = `${item.baseShortId ?? item.id}_${item.lastUpdate ?? ''}`;
-          if (seenUpdates.has(key)) continue;
-          seenUpdates.add(key);
-          // Don't report updates that already existed on the first-ever run
-          if (indexing) continue;
-          console.log(JSON.stringify({ type: 'trade_update', poll: pollCount, data: item }));
+        const data = await invo.getTradeUpdates(entries);
+        for (const ev of parseTradeUpdates(data)) {
+          if (seenUpdates.has(ev.id)) continue;
+          seenUpdates.add(ev.id);
+          if (ev.kind === 'ignore') continue; // TP/SL edits: nothing to copy
+          if (ev.kind === 'unknown') {
+            console.log(JSON.stringify({
+              type: 'skipped',
+              poll: pollCount,
+              traderBaseShortId: ev.traderBaseShortId,
+              reason: `Unrecognised trade update type "${ev.updateType}"`,
+            }));
+            continue;
+          }
+          // Report each trade's close once, whether it comes from here or the feed.
+          if (ev.action === 'close') {
+            const eventKey = `${ev.traderBaseShortId}:close`;
+            if (seenEvents.has(eventKey)) continue;
+            seenEvents.add(eventKey);
+          }
+          console.log(JSON.stringify({
+            type: 'signal',
+            source: 'trade_updates',
+            poll: pollCount,
+            updateId: ev.id,
+            postedAt: ev.updatedAt,
+            ageSeconds: ageSeconds(ev.updatedAt ?? undefined),
+            action: ev.action,
+            coin: held.coinBySource.get(ev.traderBaseShortId) ?? null,
+            traderBaseShortId: ev.traderBaseShortId,
+            ratio: ev.ratio,
+            traderPositionSize: { before: ev.sizeBefore, after: ev.sizeAfter },
+            closePrice: ev.closePrice,
+            reasonClosed: ev.reasonClosed,
+          }));
           signalFound = true;
         }
         tradeFailures = 0;
@@ -192,6 +246,10 @@ async function main() {
         }
         const action = event.kind;
         const isOpen = update.isOpen === true;
+
+        // Trades we copied are followed through /dex/trade (above), which also sees
+        // partial closes; ignore their feed posts so nothing is reported twice.
+        if (held.coinBySource.has(update.baseShortId)) continue;
 
         // The update fields show the trade as it is NOW, not when the post was made.
         // Don't copy an open or add-on for a trade the trader has already closed
@@ -285,6 +343,7 @@ async function main() {
     portfolioIds: portfolioIds.length,
     feedFilter: portfolioFilter ? 'listed portfolios only' : 'all followed traders',
     resumedFromState: saved !== null,
+    heldTradesWatched: heldTrades().entries.length,
     stateFile: STATE_FILE,
   }));
 

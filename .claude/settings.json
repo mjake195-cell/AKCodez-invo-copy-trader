@@ -8,6 +8,8 @@
       "Bash(npx tsx src/commands/monitor.ts *)",
       "Bash(npx tsx src/commands/trade.ts *)",
       "Bash(npx tsx src/commands/close.ts *)",
+      "Bash(npx tsx src/commands/resize.ts *)",
+      "Bash(NODE_USE_ENV_PROXY=1 NODE_NO_WARNINGS=1 npx tsx src/commands/resize.ts *)",
       "Bash(NODE_USE_ENV_PROXY=1 NODE_NO_WARNINGS=1 npx tsx src/commands/preflight.ts *)",
       "Bash(NODE_USE_ENV_PROXY=1 NODE_NO_WARNINGS=1 npx tsx src/commands/verify.ts *)",
       "Bash(NODE_USE_ENV_PROXY=1 NODE_NO_WARNINGS=1 npx tsx src/commands/positions.ts *)",

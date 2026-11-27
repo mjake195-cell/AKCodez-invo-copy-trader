@@ -30,6 +30,7 @@ export interface LedgerPosition {
   };
   invoPositionRecordId: string | null;
   fills: Fill[];
+  appliedUpdates?: string[]; // trader updateIds already copied by resize.ts
 }
 
 export interface ClosedPosition extends LedgerPosition {

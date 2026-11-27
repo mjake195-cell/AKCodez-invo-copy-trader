@@ -42,7 +42,8 @@ You (Claude) ── reasoning + UI ── agentic decision loop
   ├── src/commands/monitor.ts   → real-time signal detection (background)
   ├── src/commands/trade.ts     → open position (HL exchange + Invo wallet)
   ├── src/commands/close.ts     → close position (HL exchange + Invo wallet)
-  └── src/commands/positions.ts → positions this agent opened vs. the exchange (read-only)
+  ├── src/commands/positions.ts → positions this agent opened vs. the exchange (read-only)
+  └── src/commands/resize.ts    → scale a copied position by the trader's ratio (increase/reduce)
       │
       ├── src/invo-client.ts    → Invo REST API (auto-refresh JWT, 350-day token)
       └── src/hl-client.ts      → Hyperliquid SDK (phantom agent signing)
@@ -161,7 +162,7 @@ This runs **10 automated checks**:
 ║  Copy Opens:          YES        (mirror new positions)              ║
 ║  Copy Closes:         YES        (mirror exits when they close)      ║
 ║  Copy Increases:      YES        (mirror position size-ups)          ║
-║  Skip Reduces:        YES        (ignore partial closes)             ║
+║  Copy Reduces:        YES        (mirror partial closes)             ║
 ║  Max Signal Age:      120s       (skip opens/increases older than)   ║
 ║                                                                      ║
 ║  RISK LIMITS                              mode: MODERATE [2]        ║
@@ -202,7 +203,7 @@ Once confirmed, show:
 ║  Auto-Copy: [ON/OFF] for traders with ≥ [X]% win rate              ║
 ║  Risk Mode: [NAME] — Max [X]x lev | [X]% position size             ║
 ║  Exit:     Mirror trader closes (no independent TP/SL)              ║
-║  Actions:  Copy opens ✓  closes ✓  increases ✓  reduces ✗          ║
+║  Actions:  Copy opens ✓  closes ✓  increases ✓  reduces ✓          ║
 ║  Max signal age: [X]s                                               ║
 ║  >> Proceeding to trader discovery...                                ║
 ╚══════════════════════════════════════════════════════════════════════╝
@@ -329,16 +330,29 @@ npx tsx src/commands/monitor.ts '["portfolioId1","portfolioId2"]' '[{"baseShortI
   - `{"type":"fatal",...}` — the monitor gave up after 12 failed polls in a row (~1 min) and exited with code 2. **Do not relaunch blindly**: tell the user the `message` (usually an expired login or blocked network) and fix that first.
   - `{"type":"error",...}` — non-fatal error, on stderr
 
-**Signal actions** (`action`). These come from what the post changed, not from the trade's current state:
+**Two sources of signals.**
+
+- **Feed** (`source` absent): new trades by the traders we follow. Use these for **`open`** signals. Feed posts for trades we already copied are ignored, because the feed misses some add-ons and never posts partial closes.
+- **Trade updates** (`"source": "trade_updates"`): every change to the trades **we copied**. The monitor watches each position in `positions.json` automatically, from the moment we opened it. These carry `coin`, `traderBaseShortId` and `ratio` (the trader's position size after ÷ before). **Use these for `increase`, `reduce` and `close`.**
 
 | `action` | Meaning | What to do |
 |---|---|---|
-| `open` | Trader opened a new trade | Evaluate; copy with `trade.ts` |
-| `increase` | Trader added to an open trade (`previousEntrySize` → `entrySize`) | If we copied this trade and Copy Increases is on, add with `trade.ts … --add` in the **same** direction |
-| `reduce` | Trader cut an open trade (never seen in the live feed yet) | Skip by default. There is no partial-close command; tell the user |
-| `close` | Trader closed the trade (`reasonClosed`: `user_closed`, `take_profit_hit`, `liquidated`, …) | If we copied this trade, close with `close.ts` |
+| `open` (feed) | Trader opened a new trade | Evaluate; copy with `trade.ts … --source=<mimicMeta.baseShortId>` |
+| `increase` (trade updates) | Trader added to a trade we copied | If Copy Increases is on and it's within Max Signal Age: `resize.ts <coin> <ratio>` |
+| `reduce` (trade updates) | Trader partly closed a trade we copied | If Copy Reduces is on: `resize.ts <coin> <ratio>` (any age) |
+| `close` (either) | Trader closed the trade (`reasonClosed`: `user_closed`, `take_profit_hit`, `stop_loss_hit`, `liquidated`, …) | If we copied it: `close.ts <coin>` (any age) |
 
-Target/stop-loss/notes edits are not signals.
+Target/stop-loss/notes edits are not signals. A `close` is reported once per trade, from whichever source sees it first.
+
+**`resize.ts <coin> <ratio>`** scales our position by the same ratio as the trader's: ×2.62 adds 162%, ×0.44 cuts 56%. An increase runs `trade.ts --add` and a reduce runs `close.ts --size=…`, so all their checks apply. It prints a `resize_plan` line first, then the result of the trade, if one was made. If the change would be under Hyperliquid's $10 minimum order, the plan says `"action": "none"` with the reason, and nothing is traded: **tell the user** that the move couldn't be copied at this position size. Add `--dry-run` to see the plan without trading.
+
+```bash
+npx tsx src/commands/resize.ts BTC 0.4412 --update=c8609d64-6223-416c-957e-9ee31ca765c0
+```
+
+**Always pass `--update=<signal.updateId>`.** `resize.ts` records each applied update in `positions.json` and refuses to apply the same one twice, so a retry or a repeated signal can never double an add or a reduce. An update that was under the $10 minimum also counts as handled. The position must be one this agent opened (in `positions.json`).
+
+**Sizing note for scaling traders.** A trader who adds while losing and trims while winning makes many small adjustments. Each one is copied only if it comes to at least $10 at our size, so with a small position most adjustments are skipped. Size the first copy large enough for the adjustments the user wants to follow (e.g. a halving needs our position to be at least $20).
 
 **Signal object shape:**
 ```json
@@ -393,7 +407,8 @@ npx tsx src/commands/monitor.ts --wait-for-signal '["portfolioId1","portfolioId2
 **When notified that the monitor exited:**
 1. If the exit code is 2 or there is a `fatal` line → stop and tell the user (see above). Don't relaunch until it's fixed.
 2. Parse every `signal` line from the process output (ignore `skipped` lines, but mention them)
-3. For `open`/`increase`: if `ageSeconds` is above the locked-in Max Signal Age, **skip it** and say why: the price has likely moved since the trader entered. `close` signals are always acted on, however old.
+3. For `open`/`increase`: if `ageSeconds` is above the locked-in Max Signal Age, **skip it** and say why: the price has likely moved since the trader entered. `reduce` and `close` signals are always acted on, however old (they take risk off).
+   Handle several signals for the same trade **in time order** (`postedAt`), e.g. increase, then reduce.
 4. Evaluate against the locked-in criteria (risk mode, max leverage, auto-copy threshold, action toggles)
 5. If auto-copy is ON and trader meets the WR threshold → execute via `trade.ts` / `close.ts`
 6. If below threshold → present the SIGNAL DETECTED panel and ask the user
@@ -619,7 +634,7 @@ npx tsx src/commands/positions.ts
 It lists `agentPositions` (what this agent opened, each with `state`: `ok`, `missing_on_exchange`, `size_mismatch` or `side_mismatch`, plus `traderBaseShortId`, `avgPx`, `leverage`, unrealized P&L), `notAgentsPositions` (open on the exchange but not opened by this agent, e.g. the user's own trades: never touch these) and `available` margin.
 
 - **Run it at the start of every session**, before relaunching the monitor, and tell the user about any `problems`. A `missing_on_exchange` position was probably liquidated or closed outside this agent.
-- **Match signals with it.** Only act on an `increase` or `close` signal whose `mimicMeta.baseShortId` equals a position's `traderBaseShortId`. Signals for trades we never copied are ignored.
+- **Match signals with it.** Trade-update signals already name our `coin`. A feed `close` is acted on only if its `mimicMeta.baseShortId` equals a position's `traderBaseShortId`. Signals for trades we never copied are ignored.
 - When opening a copy, always pass `--source=<signal.mimicMeta.baseShortId>` so the match is possible later.
 
 ### Error Recovery
