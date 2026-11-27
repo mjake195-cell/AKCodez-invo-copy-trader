@@ -3,6 +3,7 @@ import { validateEnv, INVO_TOKEN, INVO_REFRESH_TOKEN, HL_AGENT_KEY, WALLET_ADDRE
 import * as invo from '../invo-client.js';
 import * as hl from '../hl-client.js';
 import { existingPositionRefusal } from '../position-guard.js';
+import { LEDGER_FILE, loadLedger, recordOpenFill, sameSize, saveLedger, type Ledger } from '../ledger.js';
 
 validateEnv();
 if (INVO_TOKEN) invo.setToken(INVO_TOKEN);
@@ -36,13 +37,27 @@ function findBaseShortId(obj: any): string | null {
 
 async function main() {
   const argv = process.argv.slice(2);
-  // --add: add to an existing position in this coin (for copying an "increase").
+  // --add: add to a position this agent opened (for copying an "increase").
   // Without it, any coin that already has an open position is refused.
   const addMode = argv.includes('--add');
-  const [coin, side, sizeStr, leverageStr, mimicMetaJson] = argv.filter(a => a !== '--add');
+  // --source=<baseShortId>: the copied trader's trade (signal.mimicMeta.baseShortId),
+  // saved in positions.json so later increase/close signals can be matched to it.
+  const sourceArg = argv.find(a => a.startsWith('--source='));
+  const traderBaseShortId = sourceArg ? sourceArg.slice('--source='.length) || null : null;
+  const unknownFlag = argv.find(a => a.startsWith('--') && a !== '--add' && !a.startsWith('--source='));
+  if (unknownFlag) fail(`Unknown option ${unknownFlag}`);
+  const [coin, side, sizeStr, leverageStr, mimicMetaJson] = argv.filter(a => !a.startsWith('--'));
 
   if (!coin || !side || !sizeStr) {
-    fail('Usage: trade <coin> <long|short> <size> [leverage] [mimicMetaJson] [--add]');
+    fail('Usage: trade <coin> <long|short> <size> [leverage] [mimicMetaJson] [--add] [--source=<traderBaseShortId>]');
+  }
+
+  // Read positions.json before anything else, so a damaged file stops us before trading.
+  let ledger: Ledger;
+  try {
+    ledger = loadLedger();
+  } catch (e: any) {
+    fail(`Cannot read ${LEDGER_FILE}: ${e.message}. Fix or restore it before trading.`);
   }
 
   // --- Validate everything before touching the exchange ---
@@ -114,6 +129,23 @@ async function main() {
   const refusal = existingPositionRefusal(coin, side, sziBefore, addMode);
   if (refusal) fail(refusal);
 
+  // --add is only for positions this agent opened (recorded in positions.json).
+  if (addMode) {
+    const mine = ledger.open[coin];
+    if (!mine) {
+      fail(`Refusing --add: the open ${coin} position is not one this agent opened (not in ${LEDGER_FILE})`);
+    }
+    if (mine.side !== side) {
+      fail(`Refusing --add: this agent's ${coin} position is ${mine.side}, not ${side}`);
+    }
+    if (!sameSize(mine.size, sziBefore)) {
+      fail(
+        `Refusing --add: ${coin} on the exchange is ${Math.abs(sziBefore)}, but this agent opened ${mine.size}. ` +
+        `Someone else changed it; check with the user`,
+      );
+    }
+  }
+
   const sziAfter = sziBefore + (isBuy ? size : -size);
   const sameDirection = sziBefore !== 0 && Math.sign(sziAfter) === Math.sign(sziBefore);
   const addedExposure = Math.max(0, Math.abs(sziAfter) - (sameDirection ? Math.abs(sziBefore) : 0));
@@ -156,6 +188,7 @@ async function main() {
   const qtyAfter = updated ? updated.szi : '0';
 
   const clientTxId = randomUUID();
+  const realMimicMeta = mimicMeta ?? null; // only the caller's values identify the trader
   if (!mimicMeta) {
     mimicMeta = {
       portfolioId: randomUUID(),
@@ -200,8 +233,32 @@ async function main() {
   // run without one (Invo then detects the close on its own).
   const baseShortId = findBaseShortId(invoResult);
 
+  // Record the fill in positions.json. Failure here doesn't undo the trade, so it is
+  // reported loudly in the output instead of thrown.
+  let ledgerError: string | null = null;
+  try {
+    recordOpenFill(ledger, {
+      coin,
+      side,
+      leverage,
+      add: addMode,
+      fill: { at: new Date().toISOString(), size: outcome.filledSz, px: outcome.avgPx, clientTxId },
+      source: {
+        traderBaseShortId,
+        portfolioId: realMimicMeta?.portfolioId ?? null,
+        creatorInvoUserId: realMimicMeta?.creatorInvoUserId ?? null,
+      },
+      invoPositionRecordId: invoResult?.data?.positionRecordId ?? null,
+    });
+    saveLedger(ledger);
+  } catch (e: any) {
+    ledgerError = `Position is open but was NOT saved to ${LEDGER_FILE}: ${e.message}`;
+    process.exitCode = 1;
+  }
+
   console.log(JSON.stringify({
     status,
+    ledgerError,
     coin,
     side,
     requestedSize: sizeStr,

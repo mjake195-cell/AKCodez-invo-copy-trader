@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx tsx src/commands/preflight.ts *)",
+      "Bash(npx tsx src/commands/verify.ts *)",
+      "Bash(npx tsx src/commands/positions.ts *)",
+      "Bash(npx tsx src/commands/discover.ts *)",
+      "Bash(npx tsx src/commands/monitor.ts *)",
+      "Bash(npx tsx src/commands/trade.ts *)",
+      "Bash(npx tsx src/commands/close.ts *)",
+      "Bash(NODE_USE_ENV_PROXY=1 NODE_NO_WARNINGS=1 npx tsx src/commands/preflight.ts *)",
+      "Bash(NODE_USE_ENV_PROXY=1 NODE_NO_WARNINGS=1 npx tsx src/commands/verify.ts *)",
+      "Bash(NODE_USE_ENV_PROXY=1 NODE_NO_WARNINGS=1 npx tsx src/commands/positions.ts *)",
+      "Bash(NODE_USE_ENV_PROXY=1 NODE_NO_WARNINGS=1 npx tsx src/commands/discover.ts *)",
+      "Bash(NODE_USE_ENV_PROXY=1 NODE_NO_WARNINGS=1 npx tsx src/commands/monitor.ts *)",
+      "Bash(NODE_USE_ENV_PROXY=1 NODE_NO_WARNINGS=1 npx tsx src/commands/trade.ts *)",
+      "Bash(NODE_USE_ENV_PROXY=1 NODE_NO_WARNINGS=1 npx tsx src/commands/close.ts *)"
+    ],
+    "ask": [
+      "Bash(npx tsx src/commands/close.ts *--force*)",
+      "Bash(NODE_USE_ENV_PROXY=1 NODE_NO_WARNINGS=1 npx tsx src/commands/close.ts *--force*)",
+      "Bash(npx tsx src/commands/follow.ts *)",
+      "Bash(NODE_USE_ENV_PROXY=1 NODE_NO_WARNINGS=1 npx tsx src/commands/follow.ts *)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Bash(cat .env*)"
+    ]
+  }
+}

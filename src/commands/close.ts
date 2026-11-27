@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto';
 import { validateEnv, INVO_TOKEN, INVO_REFRESH_TOKEN, HL_AGENT_KEY, WALLET_ADDRESS } from '../env.js';
 import * as invo from '../invo-client.js';
 import * as hl from '../hl-client.js';
+import { LEDGER_FILE, loadLedger, recordClose, sameSize, saveLedger, type Ledger } from '../ledger.js';
 
 validateEnv();
 if (INVO_TOKEN) invo.setToken(INVO_TOKEN);
@@ -13,19 +14,77 @@ async function currentSzi(coin: string): Promise<string> {
   return pos ? pos.szi : '0';
 }
 
-async function main() {
-  const [coin, baseShortId] = process.argv.slice(2);
+function fail(message: string): never {
+  console.error(message);
+  process.exit(1);
+}
 
-  if (!coin) {
-    console.error('Usage: close <coin> [baseShortId]');
-    process.exit(1);
+function saveOrReport(ledger: Ledger): string | null {
+  try {
+    saveLedger(ledger);
+    return null;
+  } catch (e: any) {
+    process.exitCode = 1;
+    return `Could not update ${LEDGER_FILE}: ${e.message}`;
   }
+}
+
+async function main() {
+  const argv = process.argv.slice(2);
+  // --force: close a position this agent did not open, or whose size someone else
+  // changed. Only when the user explicitly asks for it.
+  const force = argv.includes('--force');
+  const unknownFlag = argv.find(a => a.startsWith('--') && a !== '--force');
+  if (unknownFlag) fail(`Unknown option ${unknownFlag}`);
+  const [coin, baseShortId] = argv.filter(a => !a.startsWith('--'));
+
+  if (!coin) fail('Usage: close <coin> [baseShortId] [--force]');
+
+  let ledger: Ledger;
+  try {
+    ledger = loadLedger();
+  } catch (e: any) {
+    fail(`Cannot read ${LEDGER_FILE}: ${e.message}. Fix or restore it first.`);
+  }
+  const mine = ledger.open[coin];
 
   await hl.connect(HL_AGENT_KEY, WALLET_ADDRESS);
 
   // Current position
   const qtyBefore = await currentSzi(coin);
-  if (parseFloat(qtyBefore) === 0) throw new Error(`No open position for ${coin}`);
+  if (parseFloat(qtyBefore) === 0) {
+    if (mine) {
+      // We recorded it, but it's gone: liquidated, or closed outside this agent.
+      recordClose(ledger, coin, null, 'missing_on_exchange', new Date().toISOString());
+      const ledgerError = saveOrReport(ledger);
+      console.log(JSON.stringify({
+        status: 'already_closed',
+        coin,
+        reason: `No open ${coin} position on the exchange, though this agent opened ${mine.size}. ` +
+          `It was probably liquidated or closed outside this agent; removed from ${LEDGER_FILE}`,
+        ledgerError,
+      }));
+      process.exitCode = 1;
+      return;
+    }
+    throw new Error(`No open position for ${coin}`);
+  }
+
+  // Only close what this agent opened, unchanged.
+  if (!force) {
+    if (!mine) {
+      fail(
+        `Refusing: the open ${coin} position (${qtyBefore}) is not one this agent opened ` +
+        `(not in ${LEDGER_FILE}). It may be the user's own trade. Use --force only if the user asks`,
+      );
+    }
+    if (!sameSize(mine.size, parseFloat(qtyBefore)) || (parseFloat(qtyBefore) > 0) !== (mine.side === 'long')) {
+      fail(
+        `Refusing: ${coin} on the exchange is ${qtyBefore}, but this agent opened a ${mine.side} of ${mine.size}. ` +
+        `Someone else changed it, and closing would close their part too. Use --force only if the user asks`,
+      );
+    }
+  }
 
   // Resolve asset index
   const meta = await hl.getMeta();
@@ -90,8 +149,19 @@ async function main() {
     }
   }
 
+  // Keep positions.json in step with what's left on the exchange.
+  const now = new Date().toISOString();
+  if (status === 'closed' || status === 'flipped') {
+    recordClose(ledger, coin, outcome.avgPx, status === 'closed' ? (force && !mine ? 'forced' : 'closed') : 'flipped', now);
+  } else if (mine) {
+    mine.size = Math.abs(after);
+    mine.updatedAt = now;
+  }
+  const ledgerError = saveOrReport(ledger);
+
   console.log(JSON.stringify({
     status,
+    ledgerError,
     coin,
     qtyBefore,
     qtyAfter,

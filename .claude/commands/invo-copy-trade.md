@@ -24,6 +24,8 @@ Narrate your reasoning confidently and visually. Think out loud like a quant ana
 **Repository**: `https://github.com/mjake195-cell/AKCodez-invo-copy-trader` (fork of `AKCodez/invo-copy-trader` with safety fixes)
 **Run commands**: `npx tsx src/commands/<cmd>.ts [args]`, always from the repository root (the folder that contains this `.claude` directory). Never `cd` to `~/Invo` or clone the upstream repo: that would run the original code without the fixes.
 
+**Run each command exactly as shown, on its own** (no `cd … &&`, no pipes, no extra prefixes other than the cloud proxy variables). `.claude/settings.json` pre-approves exactly these command forms so the loop doesn't stall on permission prompts; anything else will wait for the user to approve it.
+
 **In a Claude Code cloud session**, prefix every command with `NODE_USE_ENV_PROXY=1` (Node's built-in `fetch` ignores the HTTPS proxy otherwise and every Invo/Hyperliquid call fails with `fetch failed`). The "EnvHttpProxyAgent is experimental" warning it prints is harmless; add `NODE_NO_WARNINGS=1` to hide it.
 
 ---
@@ -39,7 +41,8 @@ You (Claude) ── reasoning + UI ── agentic decision loop
   ├── src/commands/follow.ts    → social graph management
   ├── src/commands/monitor.ts   → real-time signal detection (background)
   ├── src/commands/trade.ts     → open position (HL exchange + Invo wallet)
-  └── src/commands/close.ts     → close position (HL exchange + Invo wallet)
+  ├── src/commands/close.ts     → close position (HL exchange + Invo wallet)
+  └── src/commands/positions.ts → positions this agent opened vs. the exchange (read-only)
       │
       ├── src/invo-client.ts    → Invo REST API (auto-refresh JWT, 350-day token)
       └── src/hl-client.ts      → Hyperliquid SDK (phantom agent signing)
@@ -433,10 +436,12 @@ npx tsx src/commands/monitor.ts '["portfolioId1"]' > monitor-output.log 2>&1 &
 > **CLI ONLY** — run the command below. Do NOT use browser tools.
 
 ```bash
-npx tsx src/commands/trade.ts <coin> <long|short> <size> [leverage] ['<mimicMetaJson>'] [--add]
+npx tsx src/commands/trade.ts <coin> <long|short> <size> [leverage] ['<mimicMetaJson>'] [--add] [--source=<traderBaseShortId>]
 ```
 
-**Existing positions are protected.** Without `--add`, `trade.ts` refuses any coin that already has an open position, whoever opened it (e.g. the user's own manual trades). Use `--add` **only** to copy an `increase` signal for a position this agent opened and is tracking; it is refused unless a position in that coin is already open in the **same** direction, so it can never reduce or flip a position.
+**Existing positions are protected.** Without `--add`, `trade.ts` refuses any coin that already has an open position, whoever opened it (e.g. the user's own manual trades). Use `--add` **only** to copy an `increase` signal for a position this agent opened and is tracking; it is refused unless a position in that coin is already open in the **same** direction, so it can never reduce or flip a position. `--add` is also refused unless `positions.json` shows this agent opened that position, in that direction, at exactly the size now on the exchange.
+
+**Always pass `--source=<signal.mimicMeta.baseShortId>`** when copying a signal. It is saved in `positions.json` and is how later `increase`/`close` signals are matched to our position. If the output has a non-null `ledgerError`, the trade happened but wasn't recorded: stop and tell the user.
 
 **Arguments:**
 - `coin`: HL universe name — `SOL`, `BTC`, `ETH`, `XRP`, `DOGE`, etc.
@@ -524,8 +529,10 @@ Always pass the signal's `portfolioId` and `creatorInvoUserId` when copying a si
 > **CLI ONLY** — run the command below. Do NOT use browser tools.
 
 ```bash
-npx tsx src/commands/close.ts <coin> [baseShortId]
+npx tsx src/commands/close.ts <coin> [baseShortId] [--force]
 ```
+
+**`close.ts` only closes positions this agent opened.** It refuses a coin that isn't in `positions.json` (it may be the user's own trade), or whose size or side on the exchange differs from what this agent opened (someone else changed it, and closing would close their part too). `--force` overrides both, **only** when the user explicitly asks; Claude Code will ask the user before running it. If the position is already gone (e.g. liquidated), it prints `already_closed`, removes it from `positions.json` and exits 1: tell the user.
 
 **Arguments:**
 - `coin`: the asset to close (must have an open position)
@@ -601,14 +608,19 @@ You are not a passive executor — you are an **autonomous trading agent**. Make
 
 ### State Management
 
-Keep track of open positions mentally:
-- Which coin, direction, `filledSize`, leverage
-- **Your `baseShortId`** from `trade.ts` output, if not `null` (for `close.ts` / `/dex/position/close`)
-- **Trader's `baseShortId`** from the signal `mimicMeta` (to match later `increase`/`close` signals to this position, and for `/dex/trade` polling)
-- Entry price (`avgPx` from trade output)
-- Which trader you copied
+**Open positions are tracked in `positions.json`, not in your memory.** `trade.ts` records every fill there and `close.ts` removes positions when they close, so the record survives restarts, long sessions and context compaction. Never edit the file by hand.
 
-Only act on an `increase` or `close` signal whose trader `baseShortId` matches a position we actually opened. Signals for trades we never copied are ignored.
+Check it with the read-only command:
+
+```bash
+npx tsx src/commands/positions.ts
+```
+
+It lists `agentPositions` (what this agent opened, each with `state`: `ok`, `missing_on_exchange`, `size_mismatch` or `side_mismatch`, plus `traderBaseShortId`, `avgPx`, `leverage`, unrealized P&L), `notAgentsPositions` (open on the exchange but not opened by this agent, e.g. the user's own trades: never touch these) and `available` margin.
+
+- **Run it at the start of every session**, before relaunching the monitor, and tell the user about any `problems`. A `missing_on_exchange` position was probably liquidated or closed outside this agent.
+- **Match signals with it.** Only act on an `increase` or `close` signal whose `mimicMeta.baseShortId` equals a position's `traderBaseShortId`. Signals for trades we never copied are ignored.
+- When opening a copy, always pass `--source=<signal.mimicMeta.baseShortId>` so the match is possible later.
 
 ### Error Recovery
 

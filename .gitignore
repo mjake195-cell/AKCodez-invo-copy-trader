@@ -7,3 +7,5 @@ dist/
 monitor-output.log
 .monitor-state.json
 .monitor-state.json.tmp
+positions.json
+positions.json.tmp
