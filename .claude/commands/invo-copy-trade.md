@@ -344,15 +344,19 @@ npx tsx src/commands/monitor.ts '["portfolioId1","portfolioId2"]' '[{"baseShortI
 
 Target/stop-loss/notes edits are not signals. A `close` is reported once per trade, from whichever source sees it first.
 
-**`resize.ts <coin> <ratio>`** scales our position by the same ratio as the trader's: ×2.62 adds 162%, ×0.44 cuts 56%. An increase runs `trade.ts --add` and a reduce runs `close.ts --size=…`, so all their checks apply. It prints a `resize_plan` line first, then the result of the trade, if one was made. If the change would be under Hyperliquid's $10 minimum order, the plan says `"action": "none"` with the reason, and nothing is traded: **tell the user** that the move couldn't be copied at this position size. Add `--dry-run` to see the plan without trading.
+**`resize.ts <coin> <ratio>`** scales our position by the same ratio as the trader's: ×2.62 adds 162%, ×0.44 cuts 56%. An increase runs `trade.ts --add` and a reduce runs `close.ts --size=…`, so all their checks apply. It prints a `resize_plan` line first, then the result of the trade, if one was made. Add `--dry-run` to see the plan without trading.
+
+**Small changes are raised to the minimum order.** Hyperliquid's minimum is $10 of position value per order (about $0.25 of margin at 40×). When the trader's percentage would give a smaller order, `resize.ts` uses the smallest accepted order instead (a little over $10), so we still move with the trader, just by a bigger percentage. The plan then shows `"raisedToMinimum": true` and `ourRatio` next to the trader's `ratio`: e.g. a minimum-size position copying a +24% add **doubles** (`ourRatio` 2.0). **Tell the user** whenever this happens, with both percentages.
+
+**Reduces never leave a position too small to close.** A close is also an order and must meet the minimum, so a reduce is only made if at least ~$10.50 stays open. Otherwise the plan says `"action": "none"`, nothing is traded, and the full position is kept until the trader closes: tell the user.
 
 ```bash
 npx tsx src/commands/resize.ts BTC 0.4412 --update=c8609d64-6223-416c-957e-9ee31ca765c0
 ```
 
-**Always pass `--update=<signal.updateId>`.** `resize.ts` records each applied update in `positions.json` and refuses to apply the same one twice, so a retry or a repeated signal can never double an add or a reduce. An update that was under the $10 minimum also counts as handled. The position must be one this agent opened (in `positions.json`).
+**Always pass `--update=<signal.updateId>`.** `resize.ts` records each applied update in `positions.json` and refuses to apply the same one twice, so a retry or a repeated signal can never double an add or a reduce. An update that couldn't be copied (`"action": "none"`) also counts as handled. The position must be one this agent opened (in `positions.json`).
 
-**Sizing note for scaling traders.** A trader who adds while losing and trims while winning makes many small adjustments. Each one is copied only if it comes to at least $10 at our size, so with a small position most adjustments are skipped. Size the first copy large enough for the adjustments the user wants to follow (e.g. a halving needs our position to be at least $20).
+**Sizing note for scaling traders.** A trader who adds while losing and trims while winning makes many small adjustments. With a small position, each add is raised to the minimum order, so our position grows **faster** than the trader's while the trade is losing, and our margin use grows with it (the margin check in `trade.ts` still refuses an add we can't afford). Reduces need at least ~$21 of position (one minimum order to sell plus one left to close later), so a position opened at the minimum can't be trimmed until it has been added to. Mention both to the user when sizing a copy of such a trader.
 
 **Signal object shape:**
 ```json
