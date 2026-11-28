@@ -692,6 +692,32 @@ All requests use `POST` with `Authorization: Bearer <jwt>`, `Content-Type: appli
   - Using your own baseShortId in `/dex/trade` causes 404 errors
 - Feed posts: `update.changes` holds the **old** values of the fields that post changed (`{isAdded:false}` = trade created, `{isOpen:true,…}` = trade closed, `{entrySize:…, simIncrease:true}` = added to). All other `update` fields show the trade **as it is now**, not as it was when posted. `monitor.ts` handles this; see `src/feed-classify.ts`.
 
+### Notifications, and traders who never post to the feed (found 2026-11-28)
+
+`POST /v1_0/notifications/get_notifications` with **top-level** `{page, size}` (e.g. `{"page":1,"size":50}`; nested `params` returns only 1 item) lists the account's notifications, newest first. Each item has `notifier{id,username}`, `portfolioId`, `tradeId` (UUID), `postId`, `ticker`, `content`, `notificationType`, `positionType` (`paper` | `live`), `investmentBaseId`, `createdAt`. No size, side, leverage or price.
+
+| `notificationType` / `positionType` | Meaning |
+|---|---|
+| `user_added_investment` / `paper` | A followed trader opened a paper/feed trade. `investmentBaseId` = the feed `update.baseId` |
+| `user_position_added` / `live` | A followed trader opened a **live** position ("opened $BTC trade"). Only a `tradeId` UUID |
+| `mimic_position_updated` / `live` | The trader changed a live trade **we have copied** (added, trimmed, TP/SL). This is the "follow the trader's update" popup on our copy |
+| `mimic_position_closed` / `live` | The trader closed a live trade we have copied |
+| `position_liquidation_hit` / `live` | Liquidation of a live trade |
+
+Some traders, e.g. **@johndrockefeller** (user `4e48b913-b66f-4395-b9b8-f5240e41ab80`, portfolio `dae63459-fbe6-4875-8e07-e60dcf9776c4`, BTC only, adds while losing and trims while winning), trade only **live** positions. They **never appear in `get_feed`**, so the feed monitor cannot see them. The notifications are the only signal.
+
+**The plan the user wants for such traders (remember this):**
+1. Catch the open from a `user_position_added` notification for the trader's portfolio.
+2. Open our copy so that Invo links it to the trader's trade.
+3. From then on, watch **our own copied trade**. When the trader adds, trims, changes TP/SL or closes, Invo sends `mimic_position_updated` / `mimic_position_closed` for it, which is the popup offering to follow the trader's update. Read what changed and copy it: add or reduce with `resize.ts` (with the minimum-order rounding), close with `close.ts`.
+
+**Still unsolved:**
+- No known endpoint turns a live `tradeId` into the 10-character `baseShortId` that `/dex/trade` needs. `/dex/trade` rejects UUIDs, and `GET /investment/status/<tradeId>` returns `exists:false`.
+- The `mimicMeta` needed to link a copy of a live trade is unknown.
+- What exactly changed in a `mimic_position_updated` (new size, TP or SL) is not in the notification itself.
+
+A share link of one of his live trades, or the details of an existing copy of one, may give the missing ID.
+
 ### Hyperliquid Info API (`api.hyperliquid.xyz/info`)
 
 All `POST` with `Content-Type: application/json`.
